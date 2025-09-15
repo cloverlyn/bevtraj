@@ -2,6 +2,10 @@
 # BEVTraj
 
 Trajectory prediction from raw sensor data without relying on HD maps.
+
+## 📄 Paper
+[BEVTraj: Map-Free End-to-End Trajectory Prediction in Bird's-Eye View with Deformable Attention and Sparse Goal Proposals](https://www.arxiv.org/abs/2509.10080)
+
 ![BEVTraj Overview](figs/bevtraj.jpg)
 
 ---
