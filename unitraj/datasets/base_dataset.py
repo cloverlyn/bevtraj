@@ -1201,7 +1201,7 @@ class BaseDataset(Dataset):
             valid_ratio = v['valid_length']/v['track_length']
             if valid_ratio < 0.6: continue
             moving_distance = v['moving_distance']
-            if moving_distance < 4.0 and type=='VEHICLE': continue # kong_fixme: stationary 샘플을 줄이기 위해 2.0보다 큰 값으로 수정
+            if moving_distance < 4.0 and type=='VEHICLE': continue
             is_valid_at_m = validity[current_idx]>0
             if not is_valid_at_m: continue
 
