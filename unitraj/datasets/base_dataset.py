@@ -1171,47 +1171,43 @@ class BaseDataset(Dataset):
         return sampled_array, sampled_indices
     
     def trajectory_filter(self, data):
+        """
+        select multiple target agents based on their states
+        """
         trajs = data['track_infos']['trajs']
         current_idx = data['current_time_index']
         obj_summary = data['object_summary']
         sdc_track_idx = data['sdc_track_index']
-
+        
+        # calculate distance from ego vehicle
+        N = trajs.shape[0]
         valid_mask = trajs[:, :, -1]
-
-        ego_pos = trajs[sdc_track_idx, current_idx, 0:2]
-        ego_pos = ego_pos[None, None, :]
-        trajs_obj_pos = trajs[:, :, 0:2]
-
-        trajs_ego_centric = trajs_obj_pos - ego_pos
-        trajs_ego_centric = trajs_ego_centric * valid_mask[..., None]
+        
+        ego_pos = np.tile(trajs[sdc_track_idx, :, 0:2], (N, 1, 1))
+        trajs_ego_centric = (trajs[:, :, 0:2] - ego_pos) * valid_mask[..., None]
         dist_from_ego = np.linalg.norm(trajs_ego_centric, axis=-1)
-
+        
         valid_count = np.sum(valid_mask, axis=-1)
         valid_count = np.where(valid_count == 0, 1, valid_count)
         dist_from_ego_avg = np.sum(dist_from_ego, axis=-1) / valid_count
-
+        
         tracks_to_predict = {}
-        for idx, (k, v) in enumerate(obj_summary.items()):
+        for idx,(k,v) in enumerate(obj_summary.items()):
             assert k == data['track_infos']['object_id'][idx], "object_id is not matched"
             if k == data['sdc_id']: continue
             type = v['type']
             validity = trajs[idx, :, -1]
             if type not in self.config['object_type']: continue
-            valid_ratio = v['valid_length'] / v['track_length']
+            valid_ratio = v['valid_length']/v['track_length']
             if valid_ratio < 0.6: continue
             moving_distance = v['moving_distance']
-            if moving_distance < 6.0 and type == 'VEHICLE': continue
-            if validity[current_idx] == 0: continue
-            if dist_from_ego_avg[idx] > 40.0: continue
+            if moving_distance < 4.0 and type=='VEHICLE': continue # kong_fixme: stationary 샘플을 줄이기 위해 2.0보다 큰 값으로 수정
+            is_valid_at_m = validity[current_idx]>0
+            if not is_valid_at_m: continue
 
-            tracks_to_predict[k] = {
-                'track_index': idx,
-                'track_id': k,
-                'difficulty': 0,
-                'object_type': type,
-                'dist_from_ego_avg': dist_from_ego_avg[idx]
-            }
-
+            tracks_to_predict[k] = {'track_index': idx, 'track_id': k, 'difficulty': 0, \
+                'object_type': type, 'dist_from_ego_avg': dist_from_ego_avg[idx]}
+            
         if len(tracks_to_predict) > self.config['target_per_scene']:
             sorted_tracks = sorted(tracks_to_predict.items(), key=lambda x: x[1]['dist_from_ego_avg'])
             tracks_to_predict = dict(sorted_tracks[:self.config['target_per_scene']])
