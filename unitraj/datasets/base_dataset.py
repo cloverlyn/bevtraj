@@ -579,6 +579,7 @@ class BaseDataset(Dataset):
             object_heading_embedding,
             obj_trajs[:, :, :, 7:9],
             acce,
+            obj_trajs[:, :, :, 6:7]
         ], axis=-1)
 
         obj_trajs_mask = obj_trajs[:, :, :, -1]
@@ -591,7 +592,7 @@ class BaseDataset(Dataset):
             center_heading=center_objects[:, 6],
             heading_index=6, rot_vel_index=[7, 8]
         )
-        obj_trajs_future_state = obj_trajs_future[:, :, :, [0, 1, 7, 8]]  # (x, y, vx, vy)
+        obj_trajs_future_state = obj_trajs_future[:, :, :, [0, 1, 7, 8, 6]]  # (x, y, vx, vy, heading)
         obj_trajs_future_mask = obj_trajs_future[:, :, :, -1]
         obj_trajs_future_state[obj_trajs_future_mask == 0] = 0
 
@@ -600,8 +601,6 @@ class BaseDataset(Dataset):
         center_gt_trajs_mask = obj_trajs_future_mask[center_obj_idxs, track_index_to_predict]
         center_gt_trajs[center_gt_trajs_mask == 0] = 0
 
-        sdc_trajs_data = obj_trajs_data[0, sdc_track_index, :, :]
-        
         assert obj_trajs_past.__len__() == obj_trajs_data.shape[1]
         valid_past_mask = np.logical_not(obj_trajs_past[:, :, -1].sum(axis=-1) == 0)
         obj_trajs_mask = obj_trajs_mask[:, valid_past_mask]
@@ -609,10 +608,6 @@ class BaseDataset(Dataset):
         obj_trajs_future_state = obj_trajs_future_state[:, valid_past_mask]
         obj_trajs_future_mask = obj_trajs_future_mask[:, valid_past_mask]
         
-        ego_mask = obj_trajs_data[..., 10] == 1
-        ego_index = np.argmax(ego_mask.any(axis=-1), axis=1)[0]
-        assert np.array_equal(sdc_trajs_data, obj_trajs_data[0, ego_index]), "after valid_past_mask, sdc_trajs_data is not sdc_data"
-
         obj_trajs_pos = obj_trajs_data[:, :, :, 0:3]
         num_center_objects, num_objects, num_timestamps, _ = obj_trajs_pos.shape
         obj_trajs_last_pos = np.zeros((num_center_objects, num_objects, 3), dtype=np.float32)
@@ -625,6 +620,9 @@ class BaseDataset(Dataset):
             cur_valid_mask = center_gt_trajs_mask[:, k] > 0
             center_gt_final_valid_idx[cur_valid_mask] = k
 
+        ego_mask = obj_trajs_data[..., 10] == 1
+        ego_index = np.argmax(ego_mask.any(axis=-1), axis=1)
+
         max_num_agents = self.config['max_num_agents']
         object_dist_to_center = np.linalg.norm(obj_trajs_data[:, :, -1, 0:2], axis=-1)
 
@@ -632,32 +630,29 @@ class BaseDataset(Dataset):
         topk_idxs = np.argsort(object_dist_to_center, axis=-1)[:, :max_num_agents]
         
         if self.config['only_train_on_ego']:
-            topk_idxs = np.expand_dims(topk_idxs, axis=-1)
-            topk_idxs = np.expand_dims(topk_idxs, axis=-1)
-            obj_trajs_data = np.take_along_axis(obj_trajs_data, topk_idxs, axis=1)
             ego_index_new = np.zeros(len(track_index_to_predict), dtype=np.int64)
-        else:
-            topk_arr = topk_idxs[0]
-            if ego_index in topk_arr:
-                idx = np.where(topk_arr == ego_index)[0][0]
-                topk_arr[idx], topk_arr[1] = topk_arr[1], topk_arr[idx]
-            else:
-                topk_arr[-1] = ego_index
-                topk_arr[1], topk_arr[-1] = topk_arr[-1], topk_arr[1]
-
-            topk_idxs[0] = topk_arr
-            assert ego_index in topk_idxs[0], "ego_index is not in topk_idxs"
-            assert ego_index == topk_idxs[0][1], "ego_index is not in the second index of topk_idxs"
-
-            topk_idxs = np.expand_dims(topk_idxs, axis=-1)
-            topk_idxs = np.expand_dims(topk_idxs, axis=-1)
-
-            sdc_data = obj_trajs_data[0, ego_index, :, :]
-
-            obj_trajs_data = np.take_along_axis(obj_trajs_data, topk_idxs, axis=1)
-            assert np.array_equal(sdc_data, obj_trajs_data[0, 1, :, :]), "the second data of obj_trajs_data is not sdc_data"
+        else: # hack implementation
+            for n in range(num_center_objects):
+                topk_arr = topk_idxs[n]
+                ego_idx = ego_index[n]
+                
+                if ego_idx in topk_arr:
+                    idx = np.where(topk_arr == ego_idx)[0][0]
+                    topk_arr[idx], topk_arr[1] = topk_arr[1], topk_arr[idx]
+                else:
+                    topk_arr[-1] = ego_idx
+                    topk_arr[1], topk_arr[-1] = topk_arr[-1], topk_arr[1]
+                
+                assert ego_idx in topk_arr, "ego_idx is not in topk_arr"
+                assert ego_idx == topk_arr[1], "ego_idx is not in the second index of topk_arr"
+                topk_idxs[n] = topk_arr
+                
             ego_index_new = np.ones(len(track_index_to_predict), dtype=np.int64)
+
+        topk_idxs = np.expand_dims(topk_idxs, axis=-1)
+        topk_idxs = np.expand_dims(topk_idxs, axis=-1)
         
+        obj_trajs_data = np.take_along_axis(obj_trajs_data, topk_idxs, axis=1)    
         obj_trajs_mask = np.take_along_axis(obj_trajs_mask, topk_idxs[..., 0], axis=1)
         obj_trajs_pos = np.take_along_axis(obj_trajs_pos, topk_idxs, axis=1)
         obj_trajs_last_pos = np.take_along_axis(obj_trajs_last_pos, topk_idxs[..., 0], axis=1)
