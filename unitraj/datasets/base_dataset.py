@@ -579,7 +579,6 @@ class BaseDataset(Dataset):
             object_heading_embedding,
             obj_trajs[:, :, :, 7:9],
             acce,
-            obj_trajs[:, :, :, 6:7]
         ], axis=-1)
 
         obj_trajs_mask = obj_trajs[:, :, :, -1]
@@ -592,7 +591,7 @@ class BaseDataset(Dataset):
             center_heading=center_objects[:, 6],
             heading_index=6, rot_vel_index=[7, 8]
         )
-        obj_trajs_future_state = obj_trajs_future[:, :, :, [0, 1, 7, 8, 6]]  # (x, y, vx, vy, heading)
+        obj_trajs_future_state = obj_trajs_future[:, :, :, [0, 1, 7, 8]]  # (x, y, vx, vy)
         obj_trajs_future_mask = obj_trajs_future[:, :, :, -1]
         obj_trajs_future_state[obj_trajs_future_mask == 0] = 0
 
