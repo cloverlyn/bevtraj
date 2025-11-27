@@ -279,9 +279,9 @@ class BaseModel(pl.LightningModule):
         if self.local_rank == 0 and status == 'val' and batch_idx < 50:
             img = visualization.visualize_prediction(batch, prediction)
             wandb.log({"prediction": [wandb.Image(img)]})
-            experiment_dir = os.path.join(f'experiment/{self.config["NAME"]}/{self.config["exp_name"]}', f"batch_{batch_idx}")
+            experiment_dir = os.path.join(f'experiment/{self.config["NAME"]}/{self.config["exp_name"]}', f"epoch{self.current_epoch}")
             os.makedirs(experiment_dir, exist_ok=True)
-            img_save_path = os.path.join(experiment_dir, f"prediction_batch_{batch_idx}_in_epoch{self.current_epoch}.png")
+            img_save_path = os.path.join(experiment_dir, f"prediction_batch_idx_{batch_idx}_in_epoch{self.current_epoch}.png")
             plt.savefig(img_save_path)
 
         return
