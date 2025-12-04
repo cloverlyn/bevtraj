@@ -4,6 +4,7 @@ import numpy as np
 
 from matplotlib import patches
 from matplotlib.colors import LinearSegmentedColormap
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from PIL import Image
 
 
@@ -202,12 +203,6 @@ def visualize_prediction(batch, prediction, draw_index=0,
     ax.set_xlim(-window_size + x_offset, window_size + x_offset)
     ax.set_ylim(-window_size, window_size)
     
-    cmap = LinearSegmentedColormap.from_list("alpha_orange", [(1, 1, 1, 0), (1, 0.549, 0, 1)])
-    norm = mcolors.Normalize(vmin=0, vmax=1)
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    cbar = plt.colorbar(sm, ax=ax, orientation='vertical', shrink=0.8)
-    cbar.set_label('Probability', fontsize=12)
-    
     # Plot the map with mask check
     map_xy = map_lanes[..., :2]
     map_type = map_lanes[..., 0, -20:]
@@ -224,20 +219,29 @@ def visualize_prediction(batch, prediction, draw_index=0,
     # draw trajectory of target agent
     sorted_ids = np.argsort(pred_future_prob)[::-1]  
     top6_ids = sorted_ids[:6]
+    
+    time_cmap = LinearSegmentedColormap.from_list(
+        "time_cmap",
+        [(1.0, 1.0, 0.0), (1.0, 0.55, 0.0)]  # yellow → orange
+    )
               
     for mode_idx in top6_ids:
         traj = pred_future_traj[mode_idx][:, :2]           
         prob = pred_future_prob[mode_idx]
-        alpha = 0.2 + 0.7 * prob
-
+        alpha = 0.3 + 0.7 * prob
+        
+        T = traj.shape[0]
+        time_colors = np.linspace(0, 1, T)
+        rgba_colors = time_cmap(time_colors)
+        rgba_colors[:, 3] = alpha  # set alpha
+        
         ax.scatter(
             traj[:, 0], traj[:, 1],
             s=70,
             marker='o',
-            facecolors=traj_color,
-            edgecolors=traj_color,
+            c=rgba_colors,
+            edgecolors=rgba_colors,
             linewidths=1.5,
-            alpha=alpha,
             zorder=10
         )
 
@@ -249,7 +253,38 @@ def visualize_prediction(batch, prediction, draw_index=0,
         elif idx == target_idx: vehicle_color = 'indianred'
         else: vehicle_color = 'cornflowerblue'
         
-        draw_vehicle_box(ax, center_x=traj[0], center_y=traj[1], sin_theta=traj[33], cos_theta=traj[34], \
+        draw_vehicle_box(ax, center_x=traj[0], center_y=traj[1], sin_theta=traj[-6], cos_theta=traj[-5], \
                          color=vehicle_color, alpha=0.8)
+        
+    # Colorbars (Time, Probability)
+    divider = make_axes_locatable(ax)
+    cax_time = divider.append_axes("right", size="5%", pad=0.5)
+    cax_prob = divider.append_axes("right", size="5%", pad=1.0)
+
+    # Time colorbar
+    time_norm = mcolors.Normalize(vmin=0, vmax=1)
+    cb_time = plt.colorbar(
+        plt.cm.ScalarMappable(norm=time_norm, cmap=time_cmap),
+        cax=cax_time
+    )
+    cb_time.set_label("t+0s → t+6s", fontsize=15)
+    cb_time.set_ticks([])
+
+    # Probability colorbar
+    prob_cmap = LinearSegmentedColormap.from_list(
+        "prob_cmap",
+        [
+            (0.0, (1, 1, 1, 0.3)),      # low prob
+            (1.0, (1.0, 0.55, 0.0, 1))  # high prob
+        ]
+    )
+    prob_norm = mcolors.Normalize(vmin=0, vmax=1)
+    
+    cb_prob = plt.colorbar(
+        plt.cm.ScalarMappable(norm=prob_norm, cmap=prob_cmap),
+        cax=cax_prob
+    )
+    cb_prob.set_label("low → high", fontsize=15)
+    cb_prob.set_ticks([])
     
     return plt
