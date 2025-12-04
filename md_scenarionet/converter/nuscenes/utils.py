@@ -73,7 +73,7 @@ def parse_frame(frame, nuscenes: NuScenes):
         "type": "vehicle.car",
         "velocity": np.array([0.0, 0.0]),
         # size https://en.wikipedia.org/wiki/Renault_Zoe
-        "size": [4.08, 1.73, 1.56],
+        "size": [1.73, 4.08, 1.56],
     }
     return ret
 
