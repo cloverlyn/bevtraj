@@ -181,7 +181,8 @@ class BaseModel(pl.LightningModule):
 
         # Calculate ADE losses
         ade_diff = torch.norm(predicted_traj[:, :, :, :2] - gt_traj[:, :, :, :2], 2, dim=-1)
-        ade_losses = torch.sum(ade_diff * gt_traj_mask, dim=-1) / torch.sum(gt_traj_mask, dim=-1)
+        valid_counts = gt_traj_mask.sum(dim=-1).clamp_min(1e-6)
+        ade_losses = torch.sum(ade_diff * gt_traj_mask, dim=-1) / valid_counts
         ade_losses = ade_losses.cpu().detach().numpy() # (B, K)
         
         top5_indices = np.argsort(predicted_prob, axis=1)[:, -5:]  # (B, 5)
