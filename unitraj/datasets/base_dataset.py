@@ -629,22 +629,26 @@ class BaseDataset(Dataset):
         topk_idxs = np.argsort(object_dist_to_center, axis=-1)[:, :max_num_agents]
         
         if self.config['only_train_on_ego']:
-            ego_index_new = np.zeros(len(track_index_to_predict), dtype=np.int64)
-        else: # hack implementation
+            ego_index_new = np.zeros(len(track_index_to_predict), dtype=np.int64)        
+        else:
             for n in range(num_center_objects):
                 topk_arr = topk_idxs[n]
                 ego_idx = ego_index[n]
                 
                 if ego_idx in topk_arr:
-                    idx = np.where(topk_arr == ego_idx)[0][0]
-                    topk_arr[idx], topk_arr[1] = topk_arr[1], topk_arr[idx]
+                    others = topk_arr[topk_arr != ego_idx]
                 else:
-                    topk_arr[-1] = ego_idx
-                    topk_arr[1], topk_arr[-1] = topk_arr[-1], topk_arr[1]
+                    others = topk_arr[:-1]
+                assert others.size > 0, "Invalid agent selection: 'others' became empty."
                 
-                assert ego_idx in topk_arr, "ego_idx is not in topk_arr"
-                assert ego_idx == topk_arr[1], "ego_idx is not in the second index of topk_arr"
-                topk_idxs[n] = topk_arr
+                new_row = np.concatenate([
+                    others[:1],
+                    np.array([ego_idx]),
+                    others[1:]
+                ])
+                
+                assert new_row.size == max_num_agents, "Final selected agents do not match max_num_agents."
+                topk_idxs[n] = new_row
                 
             ego_index_new = np.ones(len(track_index_to_predict), dtype=np.int64)
 
