@@ -647,7 +647,7 @@ class BaseDataset(Dataset):
                     others[1:]
                 ])
                 
-                assert new_row.size == max_num_agents, "Final selected agents do not match max_num_agents."
+                assert new_row.size == topk_arr.size, "array size mismatch"
                 topk_idxs[n] = new_row
                 
             ego_index_new = np.ones(len(track_index_to_predict), dtype=np.int64)
