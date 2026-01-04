@@ -285,5 +285,6 @@ class BaseModel(pl.LightningModule):
             os.makedirs(experiment_dir, exist_ok=True)
             img_save_path = os.path.join(experiment_dir, f"prediction_batch_idx_{batch_idx}_in_epoch{self.current_epoch}.png")
             plt.savefig(img_save_path)
+            plt.close('all')
 
         return
