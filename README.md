@@ -3,6 +3,18 @@
 
 Trajectory prediction from raw sensor data without relying on HD maps.
 
+## 🚧 Project Status
+
+⚠️ This project is under active development.
+
+- The paper is currently **under revision**
+- The codebase is **not fully complete**
+- APIs and implementations may change without notice
+- Additional features and fixes will be updated soon
+
+Please treat the current version as a **preview/research prototype** rather than a final release.
+
+
 ## 📄 Paper
 [BEVTraj: Map-Free End-to-End Trajectory Prediction in Bird's-Eye View with Deformable Attention and Sparse Goal Proposals](https://www.arxiv.org/abs/2509.10080)
 
