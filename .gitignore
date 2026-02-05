@@ -20,3 +20,7 @@ tmp/
 wandb/
 
 environment.yml
+
+legacy/
+*_legacy.py
+*_local.yaml
