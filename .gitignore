@@ -23,4 +23,7 @@ environment.yml
 
 legacy/
 *_legacy.py
+*_exp.py
+*_exp.yaml
+*_local.py
 *_local.yaml
