@@ -79,7 +79,7 @@ Follow the official instructions from [Scenarionet](https://scenarionet.readthed
 ```bash
 git clone https://github.com/metadriverse/metadrive.git
 cd metadrive
-pip install -e.
+pip install -e .
 
 git clone https://github.com/metadriverse/scenarionet.git
 cd scenarionet
@@ -89,6 +89,7 @@ pip install -e .
 ### 4. BEVTraj Setup
 
 ```bash
+cd ~/bevtraj
 pip install -r requirements.txt
 python setup.py develop
 ```
