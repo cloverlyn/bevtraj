@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
+*.so
+*.pyd
+*.dll
 .env
 *.ipynb_checkpoints
 .DS_Store
