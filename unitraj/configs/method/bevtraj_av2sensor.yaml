@@ -247,13 +247,13 @@ max_num_agents: &max_num_agents 32
 object_type: &object_type ['VEHICLE']
 masked_attributes: &masked_attributes ['z_axis']
 only_train_on_ego: &only_train_on_ego false
-target_per_scene: &target_per_scene 5
+target_per_scene: &target_per_scene 4
 use_cache: &use_cache false
 overwrite_cache: &overwrite_cache true
 store_data_in_memory: &store_data_in_memory false
 trajectory_sample_interval: &trajectory_sample_interval 1
 multisample_per_scene: &multisample_per_scene true
-frame_skip_interval: &frame_skip_interval 5
+frame_skip_interval: &frame_skip_interval 6
 #map (only for visualization)
 ego_get_map_data: &ego_get_map_data false
 map_range: &map_range 100
