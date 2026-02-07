@@ -14,7 +14,7 @@ import torch
 from torch import nn, Tensor
 
 from .multi_head_attention import MultiheadAttention
-from .multi_head_attention_local import MultiheadAttentionLocal
+from .multi_head_attention_lcl import MultiheadAttentionLocal
 from .transformer_encoder_layer import _get_activation_fn
 
 

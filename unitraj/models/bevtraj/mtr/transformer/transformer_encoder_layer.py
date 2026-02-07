@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch import nn, Tensor
 
 from .multi_head_attention import MultiheadAttention
-from .multi_head_attention_local import MultiheadAttentionLocal
+from .multi_head_attention_lcl import MultiheadAttentionLocal
 
 
 def _get_activation_fn(activation):
