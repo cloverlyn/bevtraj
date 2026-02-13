@@ -10,6 +10,7 @@ from unitraj.models.bevtraj.decoder_deform_attn2d import DeformableCrossAttentio
 from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead
 from unitraj.models.bevtraj.positional_encoding_utils import gen_sineembed_for_position
 
+
 class QueryConditionedDynamics(nn.Module):
     """
     dynamics: [batch_size, query_num, dyn_dim]
@@ -81,20 +82,21 @@ class SineEmbedCache:
 # Temporal Positional Encoding (unchanged)
 # =========================================================================================
 class TemporalPositionalEncoding(nn.Module):
+
     def __init__(self, d_model, dropout=0.1, future_len=12, temperature=500.0):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-
+        self.T = future_len
         pe = torch.zeros(future_len, d_model)
-        position = torch.arange(0, future_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float()
-                             * (-math.log(temperature) / d_model))
+        position = torch.arange(0, future_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(temperature) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_parameter('pe', nn.Parameter(pe, requires_grad=False))
 
     def forward(self, x):
-        x = x + self.pe[:, :x.size(1)]
+        x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
 
