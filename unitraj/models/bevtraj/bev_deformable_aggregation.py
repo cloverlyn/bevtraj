@@ -126,7 +126,7 @@ class BDA_ENC(BEVDeformableAggregation):
         
         self.refine_share_param = config['refine_share_param']
         
-        file_path = 'unitraj/models/bevtraj_ms/cluster_64_center_dict_6s.pkl'
+        file_path = 'unitraj/models/bevtraj/cluster_64_center_dict_6s.pkl'
         with open(file_path, 'rb') as f:
             anchors = pickle.load(f)
         self.register_buffer('anchors', torch.from_numpy(anchors['VEHICLE']).float())
