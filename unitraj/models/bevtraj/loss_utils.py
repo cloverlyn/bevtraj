@@ -160,7 +160,8 @@ class Criterion(nn.Module):
         else:
             reg_loss = reg_loss.min(dim=1)[0].mean()
         
-        return self.config['goal_reg_loss_weight'] * reg_loss + disp_loss
+        total_loss = self.config['goal_reg_weight'] * reg_loss + self.config['disp_weight'] * disp_loss
+        return total_loss
 
     def get_dense_future_prediction_loss(self, prediction, gt):
         obj_trajs_future_state = gt['obj_trajs_future_state']
@@ -200,6 +201,8 @@ class Criterion(nn.Module):
         loss_reg = loss_reg.mean()
 
       
+        # return loss_reg * 10.0 # kong_fixme
+        # return loss_reg * 3.0
         return loss_reg
     
     def nll_loss_gmm_direct(self, pred_scores, pred_trajs, gt_trajs, gt_valid_mask, pre_nearest_mode_idxs=None,
