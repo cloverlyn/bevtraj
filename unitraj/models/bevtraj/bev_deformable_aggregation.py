@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import copy
+import pickle
+from abc import ABC, abstractmethod
+
 from unitraj.models.bevtraj.linear import build_mlp, MLP, FFN
 from unitraj.models.bevtraj.positional_encoding_utils import gen_sineembed_for_position
 
@@ -10,11 +13,9 @@ from unitraj.models.bevtraj.positional_encoding_utils import gen_sineembed_for_p
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
-
 def inverse_tanh(x, eps=1e-5):
     x = x.clamp(min=-1 + eps, max=1 - eps)
     return torch.atanh(x)
-
 
 class DeformAttn(nn.Module):
     def __init__(self, config, d_model, grid_size):
@@ -43,6 +44,8 @@ class DeformAttn(nn.Module):
         sampling_offsets = self.sampling_offsets(ba_query).reshape(B, N, self.n_heads, self.n_points, 2).permute(0, 2, 1, 3, 4)
         sampling_locations = ref_pos.unsqueeze(1).unsqueeze(3) + sampling_offsets / self.offset_normalizer[None, None, None, None, :]
         sampling_locations = sampling_locations.reshape(B*self.n_heads, N, self.n_points, 2)
+        
+        sampling_locations[..., 1] = sampling_locations[..., 1] * -1 # Align with F.grid_sample coordinate system
         
         sampled_feature = F.grid_sample(value, sampling_locations, align_corners=False, mode='bilinear')
         sampled_feature = sampled_feature.reshape(B, self.n_heads, -1, N, self.n_points).permute(0, 1, 3, 4, 2)
@@ -89,20 +92,18 @@ class BDALayer(nn.Module):
         return output
         
 
-class BEVDeformableAggregation(nn.Module):
+class BEVDeformableAggregation(nn.Module, ABC):
     def __init__(self, config, d_model):
         super(BEVDeformableAggregation, self).__init__()
         
         self.config = config
         self.D = d_model
         self.dropout = config['dropout']
-        self.num_ba_query = config['num_ba_query']
+        # self.num_ba_query = config['num_ba_query']
+        self.num_ba_query = 512
         self.grid_size = config['grid_size']
         
         self.ba_query = nn.Parameter(torch.zeros(self.num_ba_query, self.D), requires_grad=True)
-        # self.ref_pos = nn.Parameter(self.create_uniform_2d_grid_tensor(self.num_ba_query), requires_grad=True)
-        self.ref_pos = nn.Parameter(torch.empty(self.num_ba_query, 2), requires_grad=True) # (256, 2)
-        nn.init.xavier_uniform_(self.ref_pos)
         
         self.pos_scale = build_mlp(self.D, self.D, self.D, dropout=self.dropout)
         self.query_pos = build_mlp(self.D, self.D, self.D, dropout=self.dropout)
@@ -111,44 +112,149 @@ class BEVDeformableAggregation(nn.Module):
             BDALayer(self.config['bda_layer'], self.D, self.grid_size)
             for _ in range(self.config['num_bda_layers'])
         ])
-        
-        ref_pos_refine = MLP(self.D, self.D, 2, 3)
-        self.ref_pos_refine = _get_clones(ref_pos_refine, self.config['num_bda_layers'])
-        
-        new_grid_size = config['grid_size'].copy()
-        new_grid_size[1] *= -1  # Align with Unitaj coordinate system
-        self.register_buffer('denorm_scale', torch.tensor(new_grid_size, dtype=torch.float32))
-        
-    def create_uniform_2d_grid_tensor(self, n_points):
-        side = int(n_points ** 0.5)
-        if side ** 2 != n_points:
-            raise ValueError("n_points == n * n")
+            
+        self.register_buffer('denorm_scale', torch.tensor(self.grid_size, dtype=torch.float32))
+    
+    @abstractmethod
+    def forward(self, *args, **kwargs):
+        pass
+    
 
-        x = torch.linspace(-1, 1, side)
-        y = torch.linspace(-1, 1, side)
-        yy, xx = torch.meshgrid(y, x, indexing='ij')
-        grid = torch.stack([xx, yy], dim=-1)
-        return grid.reshape(-1, 2)
+class BDA_ENC(BEVDeformableAggregation):
+    def __init__(self, config, d_model):
+        super(BDA_ENC, self).__init__(config, d_model)
         
-    def forward(self, bev_feat):
+        self.refine_share_param = config['refine_share_param']
         
-        B = bev_feat.shape[0]
-        output, raw_ref_pos = map(lambda x: x[None].repeat(B, 1, 1), [self.ba_query, self.ref_pos])
-        ref_pos = torch.tanh(raw_ref_pos)
+        file_path = 'unitraj/models/bevtraj_ms/cluster_64_center_dict_6s.pkl'
+        with open(file_path, 'rb') as f:
+            anchors = pickle.load(f)
+        self.register_buffer('anchors', torch.from_numpy(anchors['VEHICLE']).float())
+        
+        refine_layer = MLP(self.D, self.D, 2, 3)
+        nn.init.zeros_(refine_layer.layers[-1].weight)
+        nn.init.zeros_(refine_layer.layers[-1].bias)
+        
+        if self.refine_share_param:
+            self.ref_pos_refine = refine_layer
+        else:
+            self.ref_pos_refine = _get_clones(refine_layer, self.config['num_bda_layers'])
+            
+    def place_template_points(self, tc_pos, obj_pos, obj_heading):
+        """
+        Place template points around each object by applying its pose (position + heading).
+
+        Args:
+            tc_pos (torch.Tensor): (B, A, K, 2) (target-centric coordinates)
+            obj_pos (torch.Tensor): (B, A, 2) (x, y)
+            obj_heading (torch.Tensor): (B, A, 2) (sin, cos)
+
+        Returns:
+            new_pos (torch.Tensor): (B, A, K, 2) template positions for each object
+        """
+        B, A, K, _ = tc_pos.shape
+
+        sin, cos = obj_heading[..., 0], obj_heading[..., 1]  # (B,A)
+
+        rot_mat = torch.stack([
+            torch.stack([cos, sin], dim=-1),
+            torch.stack([-sin, cos], dim=-1)
+        ], dim=-2)   # (B,A,2,2)
+
+        rotated = torch.matmul(tc_pos, rot_mat)  # (B,A,K,2)
+        new_pos = rotated + obj_pos[:, :, None, :]   # (B,A,K,2)
+
+        return new_pos
+    
+    def target_to_ego(self, tc_pos, ego_pos, ego_heading):
+        """
+        Transform points from target-centric coordinates to ego-centric coordinates.
+
+        Args:
+            tc_pos (torch.Tensor): (B, N, 2) (target-centric coordinates)
+            ego_pos (torch.Tensor): (B, 2) (x, y)
+            ego_heading (torch.Tensor): (B, 2) (sin, cos)
+
+        Returns:
+            ego_pos (torch.Tensor): (B, N, 2) points in ego-centric coordinates
+        """
+        B, N, _ = tc_pos.shape
+
+        sin, cos = ego_heading[:, 0], ego_heading[:, 1]  # (B,)
+
+        rot_mat = torch.stack([
+            torch.stack([cos, -sin], dim=-1),
+            torch.stack([sin, cos], dim=-1)
+        ], dim=-2)   # (B,2,2)
+
+        pos = tc_pos - ego_pos[:, None, :]   # (B,N,2)
+        ego_centric_pos = torch.matmul(pos, rot_mat)  # (B,N,2)
+
+        return ego_centric_pos
+        
+    def forward(self, traj_data, bev_feat):
+        # create reference points based on object positions and headings
+        obj_pos = traj_data['obj_trajs'][:, :8, -1, 0:2] # x, y
+        obj_heading = traj_data['obj_trajs'][:, :8, -1, -6:-4] # sin, cos
+        
+        B, A, _ = obj_pos.shape
+        K = self.anchors.shape[0]
+        
+        anchor_pos = self.anchors[None, None, :, :]
+        anchor_pos = anchor_pos.repeat(B, A, 1, 1)
+        
+        ref_pos_target = self.place_template_points(anchor_pos, obj_pos, obj_heading).reshape(B, A*K, 2) # (B, 256, 2)
+        ref_pos_ego = self.target_to_ego(ref_pos_target, obj_pos[:, 1, :], obj_heading[:, 1, :]) # (B, 256, 2) # kong_fixme
+        ref_pos = ref_pos_ego / self.denorm_scale[None, None, :] # normalize
+        
+        # BEV Deformable Aggregation
+        output = self.ba_query[None].repeat(B, 1, 1)
         
         for lid, layer in enumerate(self.bda_layers):
-            query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=20)
+            ref_pos_denorm = ref_pos * self.denorm_scale[None, None, :]
+            query_sine_embed = gen_sineembed_for_position(ref_pos_denorm, hidden_dim=self.D, temperature=10000)
             query_pos = self.pos_scale(output) * self.query_pos(query_sine_embed)
             
             output = layer(output, query_pos, ref_pos, bev_feat)
             
-            tmp = self.ref_pos_refine[lid](output)
-            ref_pos = torch.tanh(tmp + inverse_tanh(ref_pos))
+            if self.refine_share_param:
+                tmp = self.ref_pos_refine(output)
+            else:
+                tmp = self.ref_pos_refine[lid](output)
+                
+            ref_pos = tmp.tanh() * 0.5 + ref_pos
             
-        ref_pos = ref_pos * self.denorm_scale[None, None, :]
+        ref_pos_out = ref_pos * self.denorm_scale[None, None, :]
+        return output, ref_pos_out
+    
+    
+class BDA_DEC(BEVDeformableAggregation):
+    def __init__(self, config, d_model):
+        super(BDA_DEC, self).__init__(config, d_model)
         
-        return output, ref_pos
+        self.ref_pos = nn.Parameter(self.make_center_grid(self.num_ba_query), requires_grad=True)
         
+    def make_center_grid(self, n_points):
+        N = int(math.sqrt(n_points))
+        assert N * N == n_points, "n_points must be a perfect square"
+
+        centers = (torch.arange(N, dtype=torch.float32) + 0.5) / N * 2 - 1
+        grid_y, grid_x = torch.meshgrid(centers, centers, indexing='ij')
+
+        grid = torch.stack([grid_x, grid_y], dim=-1)
+        grid = grid.reshape(-1, 2)
+
+        return grid
+    
+    def forward(self, bev_feat):
+        B = bev_feat.shape[0]
+        output, ref_pos = map(lambda x: x[None].repeat(B, 1, 1), [self.ba_query, self.ref_pos])
         
+        for layer in self.bda_layers:
+            query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=20)
+            query_pos = self.pos_scale(output) * self.query_pos(query_sine_embed)
+            
+            output = layer(output, query_pos, ref_pos, bev_feat)
         
-        
+        ref_pos_out = ref_pos * self.denorm_scale[None, None, :]
+        return output, ref_pos_out

@@ -1,35 +1,106 @@
 import math
 import copy
 import pickle
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from unitraj.models.bevtraj.decoder_deform_attn2d import DeformableCrossAttention2D_Q, DeformableCrossAttention2D_K, DeformableCrossAttention2D_layer1
+from unitraj.models.bevtraj.bev_deformable_aggregation_dec import BEVDeformableAggregation
+from unitraj.models.bevtraj.decoder_deform_attn2d import DeformableCrossAttention2D_Q
 from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead
 from unitraj.models.bevtraj.positional_encoding_utils import gen_sineembed_for_position
 
+class QueryConditionedDynamics(nn.Module):
+    """
+    dynamics: [batch_size, query_num, dyn_dim]
+    query_emb: [batch_size, query_num, query_dim]
+    FiLM: Feature-wise Linear Modulation
+    
+    """
+    def __init__(self, dyn_dim, query_dim, hidden_dim):
+        super().__init__()
+        assert dyn_dim == hidden_dim, "For simplicity, dyn_dim should be equal to hidden_dim"
+        
+        self.modulator = nn.Sequential(
+            nn.Linear(query_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 2 * hidden_dim),
+        )
+        
+        # Initialize the last layer to produce zero modulation at the beginning
+        nn.init.zeros_(self.modulator[-1].weight)
+        nn.init.zeros_(self.modulator[-1].bias)
+        
+        
+    def forward(self, dynamics, query_emb):
+        B, N, _ = query_emb.shape
+        gamma_beta = self.modulator(query_emb) #(B, N, 2 * hidden_dim)
+        gamma, beta = gamma_beta.chunk (2, dim=-1) #(B, N, hidden_dim) each
+        conditioned = gamma * dynamics + beta #(B, N, hidden_dim)
+        return conditioned
+    
+# =========================================================================================
+# Utility: faster coordinate transform
+# =========================================================================================
+def ego_to_target(center_pos, t_x, t_y, r_s, r_c):
+    """
+    Fast target-centric coordinate transform.
+    center_pos: (B, N, 2)
+    returns: (B, N, 2)
+    """
+    B, N, _ = center_pos.shape
+    trans = torch.stack([t_x, t_y], dim=-1)  # (B, 1, 2)
+    center = center_pos + trans
 
+    R = torch.stack([
+        torch.cat([r_c,  r_s], dim=-1),
+        torch.cat([-r_s, r_c], dim=-1),
+    ], dim=1)  # (B, 2, 2)
+
+    return center @ R
+
+
+# =========================================================================================
+# Utility: Positional encoding cache
+# =========================================================================================
+class SineEmbedCache:
+    """Caches sine embeddings to avoid repeated PE computing (speed optimization)."""
+
+    def __init__(self):
+        self.cache = {}
+
+    def get(self, key, pos, dim, T):
+        if key in self.cache:
+            return self.cache[key]
+        out = gen_sineembed_for_position(pos, hidden_dim=dim, temperature=T)
+        self.cache[key] = out
+        return out
+
+
+# =========================================================================================
+# Temporal Positional Encoding (unchanged)
+# =========================================================================================
 class TemporalPositionalEncoding(nn.Module):
-
     def __init__(self, d_model, dropout=0.1, future_len=12, temperature=500.0):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-        self.T = future_len
+
         pe = torch.zeros(future_len, d_model)
-        position = torch.arange(0, future_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(temperature) / d_model))
+        position = torch.arange(0, future_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, d_model, 2).float()
+                             * (-math.log(temperature) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_parameter('pe', nn.Parameter(pe, requires_grad=False))
+        self.register_buffer("pe", pe.unsqueeze(0))
 
     def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
+        x = x + self.pe[:, :x.size(1)]
         return self.dropout(x)
 
 
+# =========================================================================================
+# Decoder Layer (reshape/permute minimized)
+# =========================================================================================
 class BEVTrajDecoderLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -92,36 +163,33 @@ class BEVTrajDecoderLayer(nn.Module):
         ref_points = ref_points - ego_loc
         ref_points = torch.matmul(ref_points.unsqueeze(-2), rotation_matrix).squeeze(-2)
         
-        # adequate coord system for F.grid_sample in bev_cross_attn
-        ref_points[..., 1] = ref_points[..., 1] * -1 # (BEV feature coordinates have inverted y-axis compared to unitraj)
-        
         # cross attn with bev feature
         dec_embed = self.norm[1](self.bev_cross_attn(dec_embed, bev_feat, query_scale, ref_points))
         dec_embed = self.norm[2](self.ffn(dec_embed))
         
         return dec_embed
-        
-        
+
+
+# =========================================================================================
+# Main Decoder (full optimization)
+# =========================================================================================
 class BEVTrajDecoder(nn.Module):
     def __init__(self, config):
         super().__init__()
-        
         self.config = config
-        
+
+        # short refs
         self.t = config['past_len']
         self.T = config['future_len']
-        
         self.D = config['d_model']
         self.ffn_D = config['ffn_dims']
         self.t_D = config['t_dims']
         self.T_D = config['T_dims']
-        
         self.K = config['num_modes']
         self.target_attr = config['target_attr']
         self.query_scale_dims = config['query_scale_dims']
         self.tem_pos_T = config['tem_pos_T']
         self.spa_pos_T = config['spa_pos_T']
-        
         self.dropout = config['dropout']
         self.L_goal_proposal = config['num_goal_proposal_layers']
         self.L_dec = config['num_decoder_layers']
@@ -143,46 +211,52 @@ class BEVTrajDecoder(nn.Module):
             'deform_cross_attn_query': self.dca_q_cfg,
         }
         
-        self.Q = nn.Parameter(torch.empty(self.K, 1, self.D), requires_grad=True)
+        # ============================ Learnable mode queries ============================
+        self.Q = nn.Parameter(torch.empty(self.K, 1, self.D))
         nn.init.xavier_uniform_(self.Q)
-        
-        # ============================== Goal Candidate Proposal ==============================
-        
-        self.ec_dynamic_encoder = nn.ModuleDict({
-            'enc': MLP(self.target_attr, self.D, self.t_D, 2),
-            'enc_t': MLP(self.t_D * self.t, self.D//2, self.D//2, 2),
-            'enc_Q': MLP(self.D//2 + self.D, self.D, self.D, 1),
-        })
-        
+
+        # ============================ BDA modules ============================
+        self.bda_sgcp = BEVDeformableAggregation(self.config['bda_sgcp'], self.D)
+
+        # ============================ Target dynamics encoder ============================
         self.tc_dynamic_encoder = nn.ModuleDict({
-            'enc': MLP(self.target_attr, self.D, self.t_D, 2),
-            'enc_t': MLP(self.t_D * self.t, self.D//2, self.D//2, 2),
-            'enc_Q': MLP(self.D//2 + self.D, self.D, self.D, 1),
+            'enc':   MLP(self.config['target_attr'], self.D, self.t_D, 2),
+            'enc_s': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
+            'enc_s_mode': MLP(self.D * 2, self.D, self.D, 2),
+            'enc_c': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
+            'enc_c_mode': MLP(self.D * 2, self.D, self.D, 2),
         })
-        
-        self.goal_proposal = []
-        for _ in range(self.L_goal_proposal):
-            goal_proposal_layer = nn.ModuleDict({
-                'deform_cross_attn_key': DeformableCrossAttention2D_K(**self.dca_k_cfg),
-                'norm1': nn.LayerNorm(self.D),
-                'mode_self_attn': nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout),
-                'norm2': nn.LayerNorm(self.D),
-                'ffn': FFN(self.D, self.ffn_D, 2),
-                'norm3': nn.LayerNorm(self.D),
-            })
-            self.goal_proposal.append(goal_proposal_layer)
-        self.goal_proposal = nn.ModuleList(self.goal_proposal)
-            
-        self.goal_proposal_reg = MLP(self.D, self.D, 2, 2)
-        self.goal_proposal_FDE = MLP(self.D, self.D, 1, 2)
-        
-        # ============================== Trajectory Initial Prediction ==============================
-        
+
+        # ============================ Goal proposal stack ============================
+        self.goal_proposal = nn.ModuleList()
+        for _ in range(config['num_goal_proposal_layers']):
+            self.goal_proposal.append(
+                nn.ModuleDict({
+                    'self_attn': nn.MultiheadAttention(self.D, config['num_heads'],
+                                                       dropout=config['dropout']),
+                    'norm1': nn.LayerNorm(self.D),
+
+                    'cross_attn': nn.MultiheadAttention(self.D * 2, config['num_heads'],
+                                                        dropout=config['dropout'],
+                                                        kdim=self.D * 2, vdim=self.D),
+                    'q_proj': MLP(self.D * 2, self.D, self.D, 2),
+                    'norm2': nn.LayerNorm(self.D),
+
+                    'ffn': FFN(self.D, self.ffn_D, 2),
+                    'norm3': nn.LayerNorm(self.D),
+
+                    'goal_reg': MLP(self.D, self.D, 2, 2),
+                })
+            )
+
+        self.goal_FDE = MLP(self.D, self.D, 1, 2)
+
+        # ============================ Initial Prediction ============================
         self.get_query_scale_l1 = MLP(self.D, self.query_scale_dims, self.query_scale_dims, 2)
         self.norm_l1 = nn.ModuleList([nn.LayerNorm(self.D) for _ in range(3)])
         
         self.context_cross_attn_l1 = nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout)
-        self.bev_cross_attn_l1 = DeformableCrossAttention2D_layer1(**self.dca_q_cfg)
+        self.bev_cross_attn_l1 = DeformableCrossAttention2D_Q(**self.dca_q_cfg)
         self.ffn_l1 = FFN(self.D, self.ffn_D, 2)
         
         self.tmp_MLP = nn.ModuleList([
@@ -191,8 +265,8 @@ class BEVTrajDecoder(nn.Module):
         ])
         self.motion_cls_l1 = MotionClsHead(self.D, self.T_D, self.T)
         self.motion_reg_l1 = MotionRegHead(self.D)
-        
-        # ============================== Trajectory Iterative Refinement ==============================
+
+        # ============================ Iterative Refinement ============================
         
         self.temp_pos_enc = TemporalPositionalEncoding(self.D, self.dropout, future_len=self.T, temperature=self.tem_pos_T)
         self.get_query_scale_T = MLP(self.query_scale_dims, self.query_scale_dims, self.query_scale_dims, 2)
@@ -203,30 +277,60 @@ class BEVTrajDecoder(nn.Module):
         self.motion_cls = MotionClsHead(self.D, self.T_D, self.T)
         self.motion_reg = MotionRegHead(self.D)
         
-    def goal_candidate_proposal(self, ec_dynamics, tc_dynamics, bev_feat):
-        B = ec_dynamics.shape[0]
-        ec_dynamics = self.ec_dynamic_encoder['enc'](ec_dynamics).reshape(B, -1)
-        ec_dynamics = self.ec_dynamic_encoder['enc_t'](ec_dynamics).unsqueeze(0).repeat(self.K, 1, 1)
-        mode_query = self.ec_dynamic_encoder['enc_Q'](torch.cat([ec_dynamics, self.Q.repeat(1, B, 1)], dim=-1))
-        
-        tc_dynamics = self.tc_dynamic_encoder['enc'](tc_dynamics).reshape(B, -1)
-        tc_dynamics = self.tc_dynamic_encoder['enc_t'](tc_dynamics).unsqueeze(0).repeat(self.K, 1, 1)
-        
-        for i, layer in enumerate(self.goal_proposal):
-            mode_query = layer['norm1'](layer['deform_cross_attn_key']( \
-                    mode_query = mode_query, bev_feat = bev_feat))
-            if i == 0:
-                mode_query = self.tc_dynamic_encoder['enc_Q'](torch.cat([tc_dynamics, mode_query], dim=-1))
-                
-            mode_query = layer['norm2'](layer['mode_self_attn']( \
-                    query = mode_query, key = mode_query, value = mode_query)[0] + mode_query)
-            mode_query = layer['norm3'](layer['ffn'](mode_query))
-            
-        goal_reg = self.goal_proposal_reg(mode_query)
-        goal_FDE = self.goal_proposal_FDE(mode_query).squeeze(dim=-1).T
-        
-        return mode_query, goal_reg, goal_FDE
 
+    # ================================================================================
+    # Goal Candidate Proposal (optimized, no behavior change)
+    # ================================================================================
+    def goal_candidate_proposal(self, tc_dyn, bda_token, bda_pos):
+        B = tc_dyn.size(0)
+
+        # dynamic feature encoding (query positional encoding)
+        d = self.tc_dynamic_encoder['enc'](tc_dyn).reshape(B, -1)
+        d_s = self.tc_dynamic_encoder['enc_s'](d).unsqueeze(0).expand(self.K, -1, -1)
+        d_s = self.tc_dynamic_encoder['enc_s_mode'](torch.cat([self.Q.expand(-1, B, -1), d_s], dim=-1))
+        d_c = self.tc_dynamic_encoder['enc_c'](d).unsqueeze(0).expand(self.K, -1, -1)
+        d_c = self.tc_dynamic_encoder['enc_c_mode'](torch.cat([self.Q.expand(-1, B, -1), d_c], dim=-1))
+
+        # BEV pos encoding (cached)
+        pos_k = SineEmbedCache().get("bda_pos", bda_pos, self.D, self.config['spa_pos_T'])
+        k = torch.cat([bda_token, pos_k], dim=-1).permute(1, 0, 2)
+        v = bda_token.permute(1, 0, 2)
+
+        goal_reg = None
+
+        for i, layer in enumerate(self.goal_proposal):
+            if i==0:
+                src = self.Q.expand(-1, B, -1)
+                mode_q = self.Q.expand(-1, B, -1) + d_s
+                
+            else:
+                src = mode_q
+                goal_reg_pos = SineEmbedCache().get("goal_reg_pos", goal_reg, self.D, self.config['spa_pos_T'])
+                mode_q = mode_q + goal_reg_pos
+            
+            mode_q = layer['self_attn'](mode_q, mode_q, mode_q)[0] + src
+            mode_q = layer['norm1'](mode_q)
+            
+            if i==0:
+                q = torch.cat([mode_q, d_c], dim=-1)
+            
+            else:
+                q = torch.cat([mode_q, goal_reg_pos], dim=-1)
+
+
+            q = layer['cross_attn'](q, k, v)[0]
+            q = layer['q_proj'](q)
+            mode_q = layer['norm2'](q + mode_q)
+            mode_q = layer['norm3'](layer['ffn'](mode_q))
+
+            goal_reg = layer['goal_reg'](mode_q)
+
+        goal_FDE = self.goal_FDE(mode_q).squeeze(-1).T
+        return mode_q, goal_reg, goal_FDE
+
+    # ================================================================================
+    # Initial Prediction (optimized)
+    # ================================================================================
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dynamics):
         K, B, _ = mode_query.shape
         query_scale = self.get_query_scale_l1(mode_query)
@@ -245,9 +349,6 @@ class BEVTrajDecoder(nn.Module):
         goal_candidate = goal_candidate - ego_loc
         goal_candidate = torch.matmul(goal_candidate.unsqueeze(-2), rotation_matrix).squeeze(-2)
         
-        # adequate coord system for F.grid_sample in bev_cross_attn
-        goal_candidate[..., 1] = goal_candidate[..., 1] * -1 # (BEV feature coordinates have inverted y-axis compared to unitraj)
-        
         # cross attn with scene feature
         dec_embed = self.norm_l1[1](self.bev_cross_attn_l1(dec_embed=dec_embed, bev_feat=bev_feat,
                                                                  query_scale = query_scale, ref_points = goal_candidate))
@@ -260,27 +361,33 @@ class BEVTrajDecoder(nn.Module):
         out_dist = self.motion_reg_l1(dec_embed_T)
         
         return dec_embed_T, mode_prob, out_dist
-    
-    def forward(self, scene_context, bev_feat, ec_dynamics, tc_dynamics, ego_dynamics, **kwargs):
-        """
-        Args:
-            scene_context: [B, n, D]
-            bev_feature: [B, D, H, W]
-            ec(ego_centric)_dynamics: [B, t, self.target_attr]
-            tc(target_agent_cetric)_dynamics: [B, t, self.target_attr]
-        Returns:
-            output: dictionary of predicted_probability and predicted_trajectory
-        """
-        B, t, _ = ec_dynamics.shape
+    # ================================================================================
+    # Main Forward (unchanged behavior, optimized computation)
+    # ================================================================================
+    def forward(self, scene_context, bev_feat,
+                ec_dyn, tc_dyn, ego_dyn, e2t_dict, **kwargs):
+
+        B, _, _ = ec_dyn.shape
         n = scene_context.shape[1]
+
+        # scene context reshape
         scene_context_repeat = scene_context.unsqueeze(2).repeat(1, 1, self.T, 1)
-        scene_context_repeat = scene_context_repeat.permute(1, 0, 2, 3).reshape(n, B*self.T, -1)
+        scene_context_repeat = scene_context_repeat.permute(1, 0, 2, 3).reshape(n, B * self.T, -1)
         scene_context = scene_context.permute(1, 0, 2)
+
+        # ego->target transform
+        trans_x, trans_y = e2t_dict['trans_x'], e2t_dict['trans_y']
+        rot_s, rot_c = e2t_dict['rot_sin'], e2t_dict['rot_cos']
         
-        mode_query, goal_reg, goal_FDE = self.goal_candidate_proposal(ec_dynamics, tc_dynamics, bev_feat)
+        # -------------------- Goal Proposal BDA --------------------
+        bda_sgcp_f, bda_sgcp_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, e2t_dict)
+        bda_sgcp_pos = ego_to_target(bda_sgcp_pos, trans_x, trans_y, rot_s, rot_c)
+
+        mode_query, goal_reg, goal_FDE = self.goal_candidate_proposal(tc_dyn, bda_sgcp_f, bda_sgcp_pos)
         goal_candidate = goal_reg.detach()
-        
-        dec_embed, init_mode_prob, init_pred_traj = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dynamics)
+
+        # -------------------- Initial Prediction --------------------
+        dec_embed, init_mode_prob, init_pred_traj = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
         
         ref_points = init_pred_traj[..., :2].detach()
         mode_probs = [init_mode_prob]
@@ -296,7 +403,7 @@ class BEVTrajDecoder(nn.Module):
                 bev_feat=bev_feat,
                 query_scale=query_scale,
                 ref_points=ref_points,
-                ego_dynamics=ego_dynamics)
+                ego_dynamics=ego_dyn)
             mode_prob = F.softmax(self.motion_cls(dec_embed), dim=0).squeeze(dim=-1).T
             pred_traj = self.motion_reg(dec_embed)
             

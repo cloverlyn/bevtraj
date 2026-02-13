@@ -6,7 +6,7 @@ from unitraj.models.bevtraj.mtr.ops.knn import knn_utils
 from unitraj.models.bevtraj.mtr.transformer import transformer_encoder_layer
 
 from unitraj.models.bevtraj.linear import build_mlp
-from unitraj.models.bevtraj.bev_deformable_aggregation import BEVDeformableAggregation
+from unitraj.models.bevtraj.bev_deformable_aggregation import BDA_ENC
 from unitraj.models.bevtraj.positional_encoding_utils import gen_sineembed_for_position
 
 
@@ -32,7 +32,8 @@ class BEVTrajSceneContextEncoder(nn.Module):
                 nn.GroupNorm(num_groups=8, num_channels=self.D),
                 nn.ReLU()
             ) if self.D != bev_feat_dim else nn.Identity()
-        self.bda = BEVDeformableAggregation(self.config['bev_deformable_aggregation'], d_model=self.D)
+        # self.bda = BEVDeformableAggregation(self.config['bev_deformable_aggregation'], d_model=self.D)
+        self.bda = BDA_ENC(self.config['bev_deformable_aggregation'], d_model=self.D)
         
         # local(global) self-attn
         self_attn_layers = []
@@ -212,7 +213,7 @@ class BEVTrajSceneContextEncoder(nn.Module):
             torch.Tensor: Transformed points in target-agent-centric coordinates, shape (B, n, 2).
         """
         n = center_pos.shape[1]
-        center_pos = center_pos - torch.cat([t_x, t_y], dim=-1).unsqueeze(1).repeat(1, n, 1)  # Shape: (B, n, 2)
+        center_pos = center_pos + torch.cat([t_x, t_y], dim=-1).unsqueeze(1).repeat(1, n, 1)  # Shape: (B, n, 2)
         
         rotation_matrix = torch.stack([
             torch.stack([r_c, r_s], dim=-1),
@@ -236,13 +237,20 @@ class BEVTrajSceneContextEncoder(nn.Module):
         
         # BEV Deformable Aggregation
         bev_feat = self.bev_feat_down(bev_feature)
-        ba_feat, ref_pos_ego = self.bda(bev_feat) # BEV Aggregated feature
+        ba_feat, ref_pos_ego = self.bda(traj_data, bev_feat) # BEV Aggregated feature
         
         # ego-centric -> target-centric
         B_idx = torch.arange(B, device=obj_trajs.device)
         ego_traj = obj_trajs[B_idx, ego_idx, :, :].unsqueeze(1)
         trans_x, trans_y, rot_sin, rot_cos = ego_traj[:, :, -1, 0], ego_traj[:, :, -1,  1], ego_traj[:, :, -1, -6], ego_traj[:, :, -1, -5]
         ref_pos_target = self.ego_to_target(ref_pos_ego, trans_x, trans_y, rot_sin, rot_cos)
+        
+        e2t_dict = {}
+        e2t_dict['trans_x'] = trans_x
+        e2t_dict['trans_y'] = trans_y
+        e2t_dict['rot_sin'] = rot_sin
+        e2t_dict['rot_cos'] = rot_cos
+        
         
         # local(global) self-attention
         zero_tensor = torch.zeros((B, ba_feat.shape[1], 1), device=ref_pos_target.device)
@@ -275,7 +283,5 @@ class BEVTrajSceneContextEncoder(nn.Module):
             obj_feature=obj_feat, obj_mask=obj_valid_mask, obj_pos=obj_trajs_last_pos
         )
         
-        return obj_feat, dense_future_pred
-        
-         
-        
+        # return obj_feat, dense_future_pred
+        return obj_feat, e2t_dict, dense_future_pred
