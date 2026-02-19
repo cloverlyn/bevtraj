@@ -24,6 +24,7 @@ wandb/
 
 environment.yml
 
+exp/
 legacy/
 *_legacy.py
 *_exp.py
