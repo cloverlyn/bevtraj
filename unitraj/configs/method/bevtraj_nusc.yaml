@@ -4,10 +4,11 @@ exp_name: &exp_name 'bevtraj_nusc'
 
 # train
 
-max_epochs: &max_epochs 50
+max_epochs: &max_epochs 30
 train_batch_size: &train_batch_size 2
 eval_batch_size: &eval_batch_size 2
 grad_clip_norm: 5
+visualize_num: &visualize_num 10
 
 # model settings
 
@@ -31,6 +32,7 @@ MODEL:
     NAME: *model_name
     exp_name: *exp_name
     past_len: *past_len
+    visualize_num: *visualize_num
 
     PRE_ENCODER:
         k_attr: 8
@@ -221,9 +223,10 @@ MODEL:
             y_bounds: [-51.2, 51.2]
 
     loss:
-        goal_reg_loss_weight: 50.0
-        entropy_weight: 40.0
-        kl_weight: 20.0
+        goal_reg_weight: 15.0
+        disp_weight: 5.0
+        entropy_weight: 10.0
+        kl_weight: 10.0
         use_FDEADE_aux_loss: true
         traj_type_weight: false
         dataset_name: *dataset_name

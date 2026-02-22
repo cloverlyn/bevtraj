@@ -146,5 +146,3 @@ class BEVTrajPreEncoder(nn.Module):
         pre_encoder_emb = agents_emb[:, :, 1:, :].permute(1, 2, 0, 3)
         
         return pre_encoder_emb
-
-
