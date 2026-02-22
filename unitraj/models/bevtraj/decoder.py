@@ -270,7 +270,7 @@ class BEVTrajDecoder(nn.Module):
 
         # ============================ Iterative Refinement ============================
         
-        self.temp_pos_enc = TemporalPositionalEncoding(self.D, self.dropout, future_len=self.T, temperature=self.tem_pos_T)
+        # self.temp_pos_enc = TemporalPositionalEncoding(self.D, self.dropout, future_len=self.T, temperature=self.tem_pos_T)
         self.get_query_scale_T = MLP(self.query_scale_dims, self.query_scale_dims, self.query_scale_dims, 2)
         
         dec_layer = BEVTrajDecoderLayer(self.dec_layer_config)
@@ -396,7 +396,7 @@ class BEVTrajDecoder(nn.Module):
         pred_trajs = [init_pred_traj.permute(0, 2, 1, 3)]
         
         dec_embed = dec_embed.permute(2, 1, 0, 3).reshape(self.T, B*self.K, -1)
-        dec_embed = self.temp_pos_enc(dec_embed)
+        # dec_embed = self.temp_pos_enc(dec_embed)
         for layer in self.dec_layers:
             query_scale = self.get_query_scale_T(dec_embed)
             dec_embed = layer(
