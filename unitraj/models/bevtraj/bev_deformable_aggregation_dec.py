@@ -2,8 +2,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
+
 from unitraj.models.bevtraj.linear import build_mlp, MLP, FFN
-from unitraj.models.bevtraj.positional_encoding_utils import gen_sineembed_for_position
+from unitraj.models.bevtraj.utility import gen_sineembed_for_position
+
+
+def _get_clones(module, N):
+    return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
+
+def inverse_tanh(x, eps=1e-5):
+    x = x.clamp(min=-1 + eps, max=1 - eps)
+    return torch.atanh(x)
 
 
 class QueryConditionedDynamics(nn.Module):
@@ -34,40 +43,6 @@ class QueryConditionedDynamics(nn.Module):
         conditioned = gamma * dynamics + beta #(B, N, hidden_dim)
         return conditioned
     
-
-def _get_clones(module, N):
-    return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
-
-def inverse_tanh(x, eps=1e-5):
-    x = x.clamp(min=-1 + eps, max=1 - eps)
-    return torch.atanh(x)
-
-def target_to_ego(center_pos, t_x, t_y, r_s, r_c):
-    """
-    Convert batched target-centric points to ego-centric coordinates using matrix multiplication.
-    
-    Args:
-        center_pos (torch.Tensor): Shape (B, n, 2), target-centric coordinates.
-        t_x (torch.Tensor): Shape (B, 1), ego's x position in target-agent-centric coordinates.
-        t_y (torch.Tensor): Shape (B, 1), ego's y position in target-agent-centric coordinates.
-        r_s (torch.Tensor): Shape (B, 1), sin of ego heading.
-        r_c (torch.Tensor): Shape (B, 1), cos of ego heading.
-    
-    Returns:
-        torch.Tensor: Transformed points in ego-centric coordinates, shape (B, n, 2).
-    """
-    n = center_pos.shape[1]
-    center_pos = center_pos - torch.cat([t_x, t_y], dim=-1).unsqueeze(1).repeat(1, n, 1)  # Shape: (B, n, 2)
-    
-    rotation_matrix = torch.stack([
-        torch.stack([r_c, -r_s], dim=-1),
-        torch.stack([r_s, r_c], dim=-1)
-    ], dim=-2)
-
-    rotation_matrix = rotation_matrix.squeeze(1)
-    rotated_points = torch.matmul(center_pos, rotation_matrix)
-    
-    return rotated_points
 
 class DeformAttn(nn.Module):
     def __init__(self, config, d_model, grid_size):
@@ -169,28 +144,17 @@ class BEVDeformableAggregation(nn.Module):
         self.refine_share_param = config['refine_share_param']
         
         self.ba_query = nn.Parameter(torch.zeros(self.num_ba_query, self.D), requires_grad=True)
-        
-        self.dyn_type = config['dyn_type'] # tc or ec
-        if self.dyn_type in ['tc', 'ec']:
-            self.dynamics_enc = nn.ModuleDict({
-                'enc': MLP(self.config['target_attr'], self.D, self.t_D, 2),
-                'enc_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
-                'enc_q': QueryConditionedDynamics(self.D, self.D),
-                'to_pos': MLP(self.D, self.D, 2, 2),
-                'enc_hyb': MLP(self.D + self.D, self.D, 2, 2),
-            })
-        else:
-            self.dynamics_enc = nn.ModuleDict({
-                'ec': MLP(self.config['target_attr'], self.D, self.t_D, 2),
-                'ec_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
-                'ec_q': QueryConditionedDynamics(self.D, self.D),
-                'ec_to_pos': MLP(self.D, self.D, 2, 2),
-                'tc': MLP(self.config['target_attr'], self.D, self.t_D, 2),
-                'tc_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
-                'tc_q': QueryConditionedDynamics(self.D, self.D),
-                'hyb': MLP(self.D + self.D, self.D, 2, 3),
-            })
-        
+
+        self.dynamics_enc = nn.ModuleDict({
+            'ec': MLP(self.config['target_attr'], self.D, self.t_D, 2),
+            'ec_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
+            'ec_q': QueryConditionedDynamics(self.D, self.D),
+            'ec_to_pos': MLP(self.D, self.D, 2, 2),
+            'tc': MLP(self.config['target_attr'], self.D, self.t_D, 2),
+            'tc_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
+            'tc_q': QueryConditionedDynamics(self.D, self.D),
+            'hyb': MLP(self.D + self.D, self.D, 2, 3),
+        })
         
         self.bda_layers = nn.ModuleList([
             BDALayer(self.config['bda_layer'], self.D, self.grid_size)
@@ -208,52 +172,22 @@ class BEVDeformableAggregation(nn.Module):
             
         self.register_buffer('denorm_scale', torch.tensor(self.grid_size, dtype=torch.float32))
         
-    def forward(self, bev_feat, ec_dyn, tc_dyn, e2t_dict):
+    def forward(self, bev_feat, ec_dyn, tc_dyn):
         B = bev_feat.shape[0]
         output = self.ba_query.repeat(B, 1, 1)
         
-        if self.dyn_type == 'ec':
-            d = self.dynamics_enc['enc'](ec_dyn).reshape(B, -1) # (B, t_D * t)
-            d = self.dynamics_enc['enc_t'](d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-            d = self.dynamics_enc['enc_q'](d.permute(1, 0, 2), output)
-            
-            ec_ref_pos = self.dynamics_enc['to_pos'](d).tanh()
+        ec_d = self.dynamics_enc['ec'](ec_dyn).reshape(B, -1) # (B, t_D * t)
+        ec_d = self.dynamics_enc['ec_t'](ec_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
+        ec_d = self.dynamics_enc['ec_q'](ec_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
         
-        elif self.dyn_type == 'tc': 
-            trans_x, trans_y = e2t_dict['trans_x'], e2t_dict['trans_y']
-            rot_s, rot_c = e2t_dict['rot_sin'], e2t_dict['rot_cos']
+        ec_pos = self.dynamics_enc['ec_to_pos'](ec_d).tanh()
+        ec_pos= gen_sineembed_for_position(ec_pos, hidden_dim=self.D, temperature=10000)
         
-            tc_d = self.dynamics_enc['enc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
-            tc_d = self.dynamics_enc['enc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-            tc_d = self.dynamics_enc['enc_q'](tc_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
-        
-            # origianl version
-            # tc_ref_pos = self.tc_dynamics['to_pos'](d)
-            # ec_ref_pos = target_to_ego(tc_ref_pos, trans_x, trans_y, rot_s, rot_c).tanh()
-            
-            tc_ref_pos = self.dynamics_enc['to_pos'](tc_d) # (B, num_ba_query, 2)
-            ec_ref_pos_feat = target_to_ego(tc_ref_pos, trans_x, trans_y, rot_s, rot_c) # (B, num_ba_query, 2) 
-            ec_ref_pos_feat = gen_sineembed_for_position(ec_ref_pos_feat, hidden_dim=self.D, temperature=10000) # (B, num_ba_query, D)
-            ec_ref_pos = self.dynamics_enc['enc_hyb'](torch.cat([tc_d, ec_ref_pos_feat], dim=-1)).tanh() # (B, num_ba_query, 2)
-        
-        elif self.dyn_type == 'tc_ec':
-            ec_d = self.dynamics_enc['ec'](ec_dyn).reshape(B, -1) # (B, t_D * t)
-            ec_d = self.dynamics_enc['ec_t'](ec_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-            ec_d = self.dynamics_enc['ec_q'](ec_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
-            
-            ec_pos = self.dynamics_enc['ec_to_pos'](ec_d).tanh()
-            ec_pos= gen_sineembed_for_position(ec_pos, hidden_dim=self.D, temperature=10000)
-            
-            tc_d = self.dynamics_enc['tc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
-            tc_d = self.dynamics_enc['tc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-            tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
-                        
-            # tc_ref_pos = self.dynamics_enc['to_pos'](tc_d) # (B, num_ba_query, 2)
-            ec_ref_pos = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)).tanh() # (B, num_ba_query, 2)
-                        
-        
-        else:
-            raise ValueError(f"Unknown dyn_type: {self.dyn_type}")
+        tc_d = self.dynamics_enc['tc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
+        tc_d = self.dynamics_enc['tc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
+        tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
+                    
+        ec_ref_pos = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)).tanh() # (B, num_ba_query, 2)
         
         for lid, layer in enumerate(self.bda_layers):
             query_sine_embed = gen_sineembed_for_position(ec_ref_pos, hidden_dim=self.D, temperature=10000)

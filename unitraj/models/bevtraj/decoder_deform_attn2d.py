@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, einsum
 from einops import rearrange
-from unitraj.models.bevtraj.positional_encoding_utils import gen_sineembed_for_position
+from unitraj.models.bevtraj.utility import gen_sineembed_for_position
 from unitraj.models.bevtraj.linear import MLP
 
 

@@ -53,7 +53,7 @@ class BEVTraj(BaseModel):
         # encoding
         pre_encoder_emb = self.pre_encoder(traj_data)
         bev_feature, seg_loss = self.sensor_encoder.get_bev_feature(sensor_data['batch_input_dict'], sensor_data['data_samples'])
-        scene_context_feature, dense_future_pred = self.scene_context_encoder(traj_data, pre_encoder_emb, bev_feature)
+        scene_context_feature, dense_future_pred = self.scene_context_encoder(traj_data, pre_encoder_emb, bev_feature, ego_dynamics)
         
         # decoding
         bev_feature = self.bev_feat_down(bev_feature)
@@ -114,7 +114,8 @@ class BEVTraj(BaseModel):
         
         # ego-vehicle dynamics
         ego_dynamics = {
-            'ego_loc': agents_in[B_idx, ego_idx, -1, :2], # (B, 2)
+            'ego_x': agents_in[B_idx, ego_idx, -1, 0:1], # (B, 1)
+            'ego_y': agents_in[B_idx, ego_idx, -1, 1:2], # (B, 1)
             'ego_sin': agents_in[B_idx, ego_idx, -1, -6:-5], # (B, 1)
             'ego_cos': agents_in[B_idx, ego_idx, -1, -5:-4], # (B, 1)
         }

@@ -7,7 +7,7 @@ import pickle
 from abc import ABC, abstractmethod
 
 from unitraj.models.bevtraj.linear import build_mlp, MLP, FFN
-from unitraj.models.bevtraj.positional_encoding_utils import gen_sineembed_for_position
+from unitraj.models.bevtraj.utility import gen_sineembed_for_position, target_to_ego
 
 
 def _get_clones(module, N):
@@ -165,34 +165,8 @@ class BDA_ENC(BEVDeformableAggregation):
         new_pos = rotated + obj_pos[:, :, None, :]   # (B,A,K,2)
 
         return new_pos
-    
-    def target_to_ego(self, tc_pos, ego_pos, ego_heading):
-        """
-        Transform points from target-centric coordinates to ego-centric coordinates.
-
-        Args:
-            tc_pos (torch.Tensor): (B, N, 2) (target-centric coordinates)
-            ego_pos (torch.Tensor): (B, 2) (x, y)
-            ego_heading (torch.Tensor): (B, 2) (sin, cos)
-
-        Returns:
-            ego_pos (torch.Tensor): (B, N, 2) points in ego-centric coordinates
-        """
-        B, N, _ = tc_pos.shape
-
-        sin, cos = ego_heading[:, 0], ego_heading[:, 1]  # (B,)
-
-        rot_mat = torch.stack([
-            torch.stack([cos, -sin], dim=-1),
-            torch.stack([sin, cos], dim=-1)
-        ], dim=-2)   # (B,2,2)
-
-        pos = tc_pos - ego_pos[:, None, :]   # (B,N,2)
-        ego_centric_pos = torch.matmul(pos, rot_mat)  # (B,N,2)
-
-        return ego_centric_pos
         
-    def forward(self, traj_data, bev_feat):
+    def forward(self, traj_data, bev_feat, ego_dyn):
         # create reference points based on object positions and headings
         obj_pos = traj_data['obj_trajs'][:, :8, -1, 0:2] # x, y
         obj_heading = traj_data['obj_trajs'][:, :8, -1, -6:-4] # sin, cos
@@ -204,7 +178,14 @@ class BDA_ENC(BEVDeformableAggregation):
         anchor_pos = anchor_pos.repeat(B, A, 1, 1)
         
         ref_pos_target = self.place_template_points(anchor_pos, obj_pos, obj_heading).reshape(B, A*K, 2) # (B, 256, 2)
-        ref_pos_ego = self.target_to_ego(ref_pos_target, obj_pos[:, 1, :], obj_heading[:, 1, :]) # (B, 256, 2) # kong_fixme
+
+        trans_x, trans_y, rot_sin, rot_cos = (
+            ego_dyn['ego_x'],
+            ego_dyn['ego_y'],
+            ego_dyn['ego_sin'],
+            ego_dyn['ego_cos'],
+        )
+        ref_pos_ego = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
         ref_pos = ref_pos_ego / self.denorm_scale[None, None, :] # normalize
         
         # BEV Deformable Aggregation

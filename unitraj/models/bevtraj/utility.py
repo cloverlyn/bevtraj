@@ -35,3 +35,37 @@ def gen_sineembed_for_position(pos_tensor, hidden_dim=256, temperature=10000):
     if pos_tensor_dim_4:
         pos = pos.view(B, K, N, -1)
     return pos
+
+
+# coordinate system transformation
+
+def ego_to_target(center_pos, t_x, t_y, r_s, r_c):
+    """
+    center_pos: (B, N, 2)
+    returns: (B, N, 2)
+    """
+    R = torch.stack([
+        torch.cat([r_c,  r_s], dim=-1),
+        torch.cat([-r_s, r_c], dim=-1),
+    ], dim=1)  # (B, 2, 2)
+    center = center_pos @ R
+
+    trans = torch.stack([t_x, t_y], dim=-1)  # (B, 1, 2)
+    center = center + trans
+    
+    return center
+
+def target_to_ego(center_pos, t_x, t_y, r_s, r_c):
+    """
+    center_pos: (B, N, 2)
+    returns: (B, N, 2)
+    """
+    trans = torch.stack([t_x, t_y], dim=-1)  # (B, 1, 2)
+    center = center_pos - trans
+
+    R = torch.stack([
+        torch.cat([r_c, -r_s], dim=-1),
+        torch.cat([r_s,  r_c], dim=-1),
+    ], dim=1)  # (B, 2, 2)
+
+    return center @ R
