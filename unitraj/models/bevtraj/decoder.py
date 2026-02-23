@@ -76,7 +76,7 @@ class BEVTrajDecoderLayer(nn.Module):
         
         dec_embed, query_scale = map(lambda t: t.reshape(self.T, B, self.K, -1).permute(2, 1, 0, 3), (dec_embed, query_scale))
         dec_embed = dec_embed + tc_pos_Q
-        dec_embed = self.transformer_decoder_layer(tgt=dec_embed.reshape(self.K, B*self.T, -1),
+        dec_embed = self.transformer_decoder_layer(tgt=dec_embed.reshape(self.K, B * self.T, -1),
                                                    memory=scene_context).reshape(self.K, B, self.T, -1)
         
         # ============================== ego-centric(ec) modeling ==============================
@@ -86,7 +86,9 @@ class BEVTrajDecoderLayer(nn.Module):
             ego_dyn['ego_sin'],
             ego_dyn['ego_cos'],
         )
-        ref_points = target_to_ego(ref_points, trans_x, trans_y, rot_sin, rot_cos)
+        ref_points_flat = ref_points.permute(1, 0, 2, 3).reshape(B, self.K * self.T, 2)
+        ref_points_flat = target_to_ego(ref_points_flat, trans_x, trans_y, rot_sin, rot_cos)
+        ref_points = ref_points_flat.reshape(B, self.K, self.T, 2).permute(1, 0, 2, 3)
         
         # cross attn with bev feature
         dec_embed = self.norm[1](self.bev_cross_attn(dec_embed, bev_feat, query_scale, ref_points))
@@ -257,7 +259,8 @@ class BEVTrajDecoder(nn.Module):
             ego_dyn['ego_sin'],
             ego_dyn['ego_cos'],
         )
-        goal_candidate = target_to_ego(goal_candidate, trans_x, trans_y, rot_sin, rot_cos)
+        goal_candidate = goal_candidate.permute(1, 0, 2)
+        goal_candidate = target_to_ego(goal_candidate, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)
         
         # cross attn with scene feature
         dec_embed = self.norm_l1[1](self.bev_cross_attn_l1(dec_embed=dec_embed, bev_feat=bev_feat,
