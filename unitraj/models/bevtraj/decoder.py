@@ -174,6 +174,9 @@ class BEVTrajDecoder(nn.Module):
 
         self.goal_FDE = MLP(self.D, self.D, 1, 2)
 
+        self.grid_size = config['grid_size']
+        self.register_buffer('denorm_scale', torch.tensor(self.grid_size, dtype=torch.float32))
+
         # ============================ Initial Prediction ============================
         self.get_query_scale_l1 = MLP(self.D, self.query_scale_dims, self.query_scale_dims, 2)
         self.norm_l1 = nn.ModuleList([nn.LayerNorm(self.D) for _ in range(3)])
@@ -215,8 +218,8 @@ class BEVTrajDecoder(nn.Module):
         k = torch.cat([bda_token, pos_k], dim=-1).permute(1, 0, 2)
         v = bda_token.permute(1, 0, 2)
 
-        goal_reg = None
-
+        goal_reg_list = []
+        goal_FDE_list = []
         for i, layer in enumerate(self.goal_proposal):
             if i==0:
                 src = self.Q.expand(-1, B, -1)
@@ -241,10 +244,20 @@ class BEVTrajDecoder(nn.Module):
             mode_q = layer['norm2'](q + mode_q)
             mode_q = layer['norm3'](layer['ffn'](mode_q))
 
-            goal_reg = layer['goal_reg'](mode_q)
+            # goal_reg = layer['goal_reg'](mode_q)
+            if i==0:
+                goal_reg = layer['goal_reg'](mode_q).tanh() * self.denorm_scale[None, None, :]
+            else:
+                tmp = layer['goal_reg'](mode_q) * 3.0    # hard code
+                goal_reg = ref_pos + tmp
 
-        goal_FDE = self.goal_FDE(mode_q).squeeze(-1).T
-        return mode_q, goal_reg, goal_FDE
+            goal_reg_list.append(goal_reg)
+            ref_pos = goal_reg.detach()
+
+            goal_FDE = self.goal_FDE(mode_q).squeeze(-1).T
+            goal_FDE_list.append(goal_FDE)
+
+        return mode_q, goal_reg_list, goal_FDE_list
 
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
         K, B, _ = mode_query.shape
@@ -294,8 +307,8 @@ class BEVTrajDecoder(nn.Module):
         )
         bda_sgcp_pos = ego_to_target(bda_sgcp_pos, trans_x, trans_y, rot_sin, rot_cos)
 
-        mode_query, goal_reg, goal_FDE = self.goal_candidate_proposal(tc_dyn, bda_token, bda_sgcp_pos)
-        goal_candidate = goal_reg.detach()
+        mode_query, goal_reg_list, goal_FDE_list = self.goal_candidate_proposal(tc_dyn, bda_token, bda_sgcp_pos)
+        goal_candidate = goal_reg_list[-1].detach()
 
         # -------------------- Initial Prediction --------------------
         dec_embed, init_mode_prob, init_pred_traj = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
@@ -331,7 +344,7 @@ class BEVTrajDecoder(nn.Module):
             
         output = {'predicted_probability': mode_probs,
                   'predicted_trajectory': pred_trajs,
-                  'predicted_goal_FDE': goal_FDE,
-                  'predicted_goal_reg': goal_reg}
+                  'predicted_goal_FDE': goal_FDE_list,
+                  'predicted_goal_reg': goal_reg_list}
         return output
     

@@ -144,23 +144,30 @@ class Criterion(nn.Module):
             loss, min_inds = (fde_loss + ade_loss).min(dim=1)
         return 100.0 * loss.mean()
     
-    def get_goal_prediction_loss(self, goal_reg, goal_FDE, gt, traj_data):
+    def get_goal_prediction_loss(self, goal_reg_list, goal_FDE_list, gt, traj_data):
         mask = gt[..., -1]
         
-        reg_loss = (torch.norm((goal_reg[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1)), 2, dim=-1) * mask[:, -1:])
+        total_loss = 0.0
+        num_layers = len(goal_reg_list)
+        assert num_layers == len(goal_FDE_list)
         
-        goal_reg_detached = goal_reg.detach()
-        FDE_gt = (torch.norm(goal_reg_detached[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1), 2, dim=-1) * mask[:, -1:])
-        disp_loss = self.goal_FDE_loss(goal_FDE, FDE_gt)
+        for goal_reg, goal_FDE in zip(goal_reg_list, goal_FDE_list):
         
-        if self.traj_type_weights:
-            type_weight = self.TRAJ_TYPE_WEIGHTS[traj_data['trajectory_type']].unsqueeze(1) # size(B, 1)
-            reg_loss = (reg_loss * type_weight).min(dim=1)[0].mean()
-            disp_loss = disp_loss * type_weight
-        else:
-            reg_loss = reg_loss.min(dim=1)[0].mean()
-        
-        total_loss = self.config['goal_reg_weight'] * reg_loss + self.config['disp_weight'] * disp_loss
+            reg_loss = (torch.norm((goal_reg[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1)), 2, dim=-1) * mask[:, -1:])
+            
+            goal_reg_detached = goal_reg.detach()
+            FDE_gt = (torch.norm(goal_reg_detached[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1), 2, dim=-1) * mask[:, -1:])
+            disp_loss = self.goal_FDE_loss(goal_FDE, FDE_gt)
+            
+            if self.traj_type_weights:
+                type_weight = self.TRAJ_TYPE_WEIGHTS[traj_data['trajectory_type']].unsqueeze(1) # size(B, 1)
+                reg_loss = (reg_loss * type_weight).min(dim=1)[0].mean()
+                disp_loss = disp_loss * type_weight
+            else:
+                reg_loss = reg_loss.min(dim=1)[0].mean()
+            
+            layer_loss = self.config['goal_reg_weight'] * reg_loss + self.config['disp_weight'] * disp_loss
+            total_loss = total_loss + layer_loss
         return total_loss
 
     def get_dense_future_prediction_loss(self, prediction, gt):

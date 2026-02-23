@@ -33,6 +33,7 @@ MODEL:
     exp_name: *exp_name
     past_len: *past_len
     visualize_num: *visualize_num
+    grid_size: &grid_size [51.2, 51.2]
 
     PRE_ENCODER:
         k_attr: 8
@@ -176,7 +177,7 @@ MODEL:
         bda_enc:
             num_ba_query: 512
             dropout: 0.1
-            grid_size: [51.2, 51.2]
+            grid_size: *grid_size
             refine_share_param: true
             use_anchor_points: true
             anchor_file_name: 'cluster_64_center_dict_6s.pkl'
@@ -192,6 +193,7 @@ MODEL:
     DECODER:
         past_len: *past_len
         future_len: *future_len
+        grid_size: *grid_size
 
         d_model: 256
         ffn_dims: 512
@@ -214,7 +216,7 @@ MODEL:
             t_dims: 64
             num_ba_query: 256
             dropout: 0.1
-            grid_size: [51.2, 51.2]
+            grid_size: *grid_size
             num_bda_layers: 3
             target_attr: *target_attr
             refine_share_param: true
