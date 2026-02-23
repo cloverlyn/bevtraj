@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
-from einops import rearrange
+
 from unitraj.models.bevtraj.utility import gen_sineembed_for_position
 from unitraj.models.bevtraj.linear import MLP
 
@@ -44,7 +44,6 @@ def normalize_grid(grid, w, h, dim = 1, out_dim = -1, ref_from_Q=False):
 
     return torch.stack((grid_w, grid_h), dim = out_dim) # grid_w: x, grid_h: y
 
-
 class Scale(nn.Module):
     def __init__(self, scale):
         super().__init__()
@@ -54,164 +53,9 @@ class Scale(nn.Module):
         return x * self.scale
 
     
-class PositionalEncoding2D_K(nn.Module):
-    def __init__(self, dim, out_dim, *, heads, offset_groups, depth):
-        super().__init__()
-        self.heads = heads
-        self.offset_groups = offset_groups
-        
-        self.mlp = nn.ModuleList([])
-        self.mlp.append(nn.Sequential(
-            nn.Linear(2, dim),
-            nn.ReLU()
-        ))
-        for _ in range(depth - 1):
-            self.mlp.append(nn.Sequential(
-                nn.Linear(dim, dim),
-                nn.ReLU()
-            ))
-        self.mlp.append(nn.Linear(dim, out_dim))
-        
-    def forward(self, grid_kv):
-        bias = grid_kv
-        for layer in self.mlp:
-            bias = layer(bias)
-        
-        bias = rearrange(bias, 'B H W D -> B D H W')
-        
-        return bias
-    
 # main class
 
-class DeformableCrossAttention2D_K(nn.Module):
-    def __init__(
-        self,
-        *,
-        dim,
-        dim_head = 64,
-        num_heads = 8,
-        dropout = 0.,
-        downsample_factor = 4,
-        offset_scale = None,
-        offset_groups = None,
-        offset_kernel_size = 6,
-        group_key_values = True,
-    ):
-        super().__init__()
-        offset_scale = default(offset_scale, downsample_factor)
-        assert offset_kernel_size >= downsample_factor, 'offset kernel size must be greater than or equal to the downsample factor'
-        assert divisible_by(offset_kernel_size - downsample_factor, 2)
-
-        offset_groups = default(offset_groups, num_heads)
-        assert divisible_by(num_heads, offset_groups)
-
-        inner_dim = dim_head * num_heads
-        self.dim = dim
-        self.dim_head = dim_head
-        self.scale = dim_head ** -0.5
-        self.num_heads = num_heads
-        self.offset_groups = offset_groups
-        offset_dims = inner_dim // offset_groups
-
-        self.downsample_factor = downsample_factor
-
-        self.to_offsets = nn.Sequential(
-            nn.Conv2d(offset_dims, offset_dims, offset_kernel_size, groups = offset_dims, stride = downsample_factor, padding = (offset_kernel_size - downsample_factor) // 2),
-            nn.GELU(),
-            nn.Conv2d(offset_dims, 2, 1, bias = False),
-            nn.Tanh(),
-            Scale(offset_scale)
-        )
-        self.pos_bias = PositionalEncoding2D_K(dim // 4, dim // offset_groups, offset_groups = offset_groups, heads = num_heads, depth = 3)
-
-        self.dropout = nn.Dropout(dropout)
-        self.to_temp_k = nn.Conv2d(dim, inner_dim, 1, groups = offset_groups if group_key_values else 1, bias = False)
-        self.to_q = nn.Linear(dim, inner_dim)
-        self.to_k = nn.Conv2d(dim, inner_dim, 1, groups = offset_groups if group_key_values else 1, bias = False)
-        self.to_v = nn.Conv2d(dim, inner_dim, 1, groups = offset_groups if group_key_values else 1, bias = False)
-        self.to_out = nn.Linear(inner_dim, dim)
-
-    def forward(self,
-                mode_query,
-                bev_feat,
-                identity=None,
-                return_vgrid = False):
-        """
-        B - batch
-        K - num_modes
-        H - height
-        W - width
-        D - dimension
-        G - offset_groups
-        
-        mode_query: (K, B, D)
-        bev_feat: (B, D, H, W)
-        """
-        if identity is None:
-            identity = mode_query
-            
-        mode_query = mode_query.permute(1, 0, 2)
-        num_heads, B, K = self.num_heads, mode_query.shape[0], mode_query.shape[1]
-        
-        # get temp_key for calculating offsets
-        
-        temp_k = self.to_temp_k(bev_feat)
-
-        # calculate offsets
-        
-        group = lambda t: rearrange(t, 'b (g d) ... -> (b g) d ...', g = self.offset_groups)
-        grouped_keys = group(temp_k)
-        offsets = self.to_offsets(grouped_keys)
-        
-        # calculate grid + offsets
-        
-        grid = create_grid_like(offsets)
-        vgrid = grid + offsets
-        vgrid_scaled = normalize_grid(vgrid, w=vgrid.shape[-1], h=vgrid.shape[-2])
-        
-        # sample features by bilinear interpolation
-        
-        kv_feats = F.grid_sample(
-            group(bev_feat),
-            vgrid_scaled,
-        mode = 'bilinear', padding_mode = 'zeros', align_corners = False)
-        
-        # Positional Encoding
-        
-        pos_bias = self.pos_bias(vgrid_scaled)
-        kv_feats = kv_feats + pos_bias
-        kv_feats = rearrange(kv_feats, '(B G) D ... -> B (G D) ...', B = B)
-        
-        # derive (q, k, v)
-        
-        q, k, v = self.to_q(mode_query), self.to_k(kv_feats), self.to_v(kv_feats)
-        
-        # split out heads & inner_product
-        
-        q = rearrange(q, 'B K (h d) -> B h K d', B=B, K=K, h=num_heads, d=self.dim_head)
-        k, v = map(lambda t: rearrange(t, 'B (h d) ... -> B h (...) d', h = num_heads), (k, v))
-            
-        # multi-head attention
-        
-        q = q * self.scale
-        
-        sim = einsum('B h K d, B h N d -> B h K N', q, k)
-        sim = sim - sim.amax(dim = -1, keepdim = True).detach() # numerical stability
-        
-        attn = sim.softmax(dim = -1)
-        attn = self.dropout(attn)
-        
-        out = einsum('B h K N, B h N d -> B h K d', attn, v)
-        out = rearrange(out, 'B h K d -> B K (h d)')
-        out = self.to_out(out).permute(1, 0, 2).contiguous()
-        
-        if return_vgrid:
-            return identity + out, vgrid
-
-        return identity + out
-
-
-class DeformableCrossAttention2D_Q(nn.Module):
+class BEVDeformCrossAttn(nn.Module):
     def __init__(
         self,
         *,

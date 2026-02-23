@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from unitraj.models.bevtraj.bev_deformable_aggregation_dec import BEVDeformableAggregation
-from unitraj.models.bevtraj.decoder_deform_attn2d import DeformableCrossAttention2D_Q
+from unitraj.models.bevtraj.bev_deformable_aggregation import BDA_DEC
+from unitraj.models.bevtraj.decoder_deform_attn import BEVDeformCrossAttn
 from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead
 from unitraj.models.bevtraj.utility import gen_sineembed_for_position, ego_to_target, target_to_ego
 
@@ -51,7 +51,7 @@ class BEVTrajDecoderLayer(nn.Module):
         self.temp_self_attn = nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout)
         self.transformer_decoder_layer = nn.TransformerDecoderLayer(self.D, self.num_heads,
                                                                     dim_feedforward=self.ffn_D, dropout=self.dropout)
-        self.bev_cross_attn = DeformableCrossAttention2D_Q(**config['deform_cross_attn_query'])
+        self.bev_cross_attn = BEVDeformCrossAttn(**config['deform_cross_attn'])
         self.ffn = FFN(self.D, self.ffn_D, 2)
     
     def forward(self, dec_embed, scene_context, bev_feat, query_scale, ref_points, ego_dyn):
@@ -119,9 +119,8 @@ class BEVTrajDecoder(nn.Module):
         self.L_dec = config['num_decoder_layers']
         self.num_heads = config['num_heads']
         
-        self.dca_k_cfg = config['deform_cross_attn_key']
-        self.dca_q_cfg = config['deform_cross_attn_query']
-        self.dca_k_cfg['dim'] = self.dca_q_cfg['dim'] = self.D
+        self.dca_cfg = config['deform_cross_attn']
+        self.dca_cfg['dim'] = self.D
         
         self.dec_layer_config = {
             'future_len': self.T,
@@ -132,7 +131,7 @@ class BEVTrajDecoder(nn.Module):
             'num_modes': self.K,
             'dropout': self.dropout,
             'num_heads': self.num_heads,
-            'deform_cross_attn_query': self.dca_q_cfg,
+            'deform_cross_attn': self.dca_cfg,
         }
         
         # ============================ Learnable mode queries ============================
@@ -140,7 +139,7 @@ class BEVTrajDecoder(nn.Module):
         nn.init.xavier_uniform_(self.Q)
 
         # ============================ BDA modules ============================
-        self.bda_sgcp = BEVDeformableAggregation(self.config['bda_sgcp'], self.D)
+        self.bda_sgcp = BDA_DEC(self.config['bda_dec'], self.D)
 
         # ============================ Target dynamics encoder ============================
         self.tc_dynamic_encoder = nn.ModuleDict({
@@ -180,7 +179,7 @@ class BEVTrajDecoder(nn.Module):
         self.norm_l1 = nn.ModuleList([nn.LayerNorm(self.D) for _ in range(3)])
         
         self.context_cross_attn_l1 = nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout)
-        self.bev_cross_attn_l1 = DeformableCrossAttention2D_Q(**self.dca_q_cfg)
+        self.bev_cross_attn_l1 = BEVDeformCrossAttn(**self.dca_cfg)
         self.ffn_l1 = FFN(self.D, self.ffn_D, 2)
         
         self.tmp_MLP = nn.ModuleList([
@@ -335,3 +334,4 @@ class BEVTrajDecoder(nn.Module):
                   'predicted_goal_FDE': goal_FDE,
                   'predicted_goal_reg': goal_reg}
         return output
+    

@@ -32,8 +32,7 @@ class BEVTrajSceneContextEncoder(nn.Module):
                 nn.GroupNorm(num_groups=8, num_channels=self.D),
                 nn.ReLU()
             ) if self.D != bev_feat_dim else nn.Identity()
-        # self.bda = BEVDeformableAggregation(self.config['bev_deformable_aggregation'], d_model=self.D)
-        self.bda = BDA_ENC(self.config['bev_deformable_aggregation'], d_model=self.D)
+        self.bda = BDA_ENC(self.config['bda_enc'], d_model=self.D)
         
         # local(global) self-attn
         self_attn_layers = []

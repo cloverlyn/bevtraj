@@ -173,10 +173,13 @@ MODEL:
         num_attn_head: 8
         dropout_of_attn: 0.1
 
-        bev_deformable_aggregation:
-            num_ba_query: 256
+        bda_enc:
+            num_ba_query: 512
             dropout: 0.1
             grid_size: [51.2, 51.2]
+            refine_share_param: true
+            use_anchor_points: true
+            anchor_file_name: 'cluster_64_center_dict_6s.pkl'
             num_bda_layers: 3
             bda_layer:
                 dropout: 0.1
@@ -196,24 +199,34 @@ MODEL:
         T_dims: 32
 
         num_modes: 10
-        target_attr: 9
+        target_attr: &target_attr 9
         query_scale_dims: 256
-        tem_pos_T: 1000
-        spa_pos_T: 1000
+        tem_pos_T: 10000
+        spa_pos_T: 10000
 
         dropout: 0.1
         num_goal_proposal_layers: 2
         num_decoder_layers: 6
         num_heads: 16
 
-        deform_cross_attn_key:
-            dim_head: 64
-            num_heads: 8
+        bda_dec:
+            past_len: *past_len
+            t_dims: 64
+            num_ba_query: 256
             dropout: 0.1
-            downsample_factor: 4
-            offset_kernel_size: 6
-            group_key_values: true
-        deform_cross_attn_query:
+            grid_size: [51.2, 51.2]
+            num_bda_layers: 3
+            target_attr: *target_attr
+            refine_share_param: true
+            bda_layer:
+                dropout: 0.1
+                num_heads: 8
+                ffn_dims: 512
+                deform_attn:
+                    num_heads: 8
+                    num_key_points: 6
+
+        deform_cross_attn:
             dim_head: 64
             num_heads: 8
             offset_groups: 16
