@@ -294,50 +294,42 @@ class BDA_DEC(BEVDeformableAggregation):
         self.t = config['past_len']
         self.t_D = config['t_dims']
 
-        self.dynamics_enc = nn.ModuleDict({
-            'ec': MLP(self.config['target_attr'], self.D, self.t_D, 2),
-            'ec_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
-            'ec_q': QueryConditionedDynamics(self.D, self.D),
-            'ec_to_pos': MLP(self.D, self.D, 2, 2),
-            'tc': MLP(self.config['target_attr'], self.D, self.t_D, 2),
-            'tc_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
-            'tc_q': QueryConditionedDynamics(self.D, self.D),
-            'hyb': MLP(self.D + self.D, self.D, 2, 3),
-        })
-
         self.bda_layers = nn.ModuleList([
             BDALayer_DEC(self.config['bda_layer'], self.D, self.grid_size)
             for _ in range(self.config['num_bda_layers'])
         ])
 
-    def forward(self, bev_feat, ec_dyn, tc_dyn):
+        file_path = 'unitraj/models/bevtraj/cluster_256_center_dict_6s.pkl'
+        with open(file_path, 'rb') as f:
+            anchors = pickle.load(f)
+        self.register_buffer('anchors', torch.from_numpy(anchors['VEHICLE']).float())
+
+    def forward(self, bev_feat, ego_dyn):
         B = bev_feat.shape[0]
-        output = self.ba_query.repeat(B, 1, 1)
-        
-        ec_d = self.dynamics_enc['ec'](ec_dyn).reshape(B, -1) # (B, t_D * t)
-        ec_d = self.dynamics_enc['ec_t'](ec_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-        ec_d = self.dynamics_enc['ec_q'](ec_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
-        
-        ec_pos = self.dynamics_enc['ec_to_pos'](ec_d).tanh()
-        ec_pos= gen_sineembed_for_position(ec_pos, hidden_dim=self.D, temperature=10000)
-        
-        tc_d = self.dynamics_enc['tc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
-        tc_d = self.dynamics_enc['tc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-        tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
-                    
-        ec_ref_pos = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)).tanh() # (B, num_ba_query, 2)
+        output = self.ba_query[None].repeat(B, 1, 1)
+        ref_pos_target = self.anchors[None].repeat(B, 1, 1)
+
+        trans_x, trans_y, rot_sin, rot_cos = (
+            ego_dyn['ego_x'],
+            ego_dyn['ego_y'],
+            ego_dyn['ego_sin'],
+            ego_dyn['ego_cos'],
+        )
+        ref_pos_ego = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
+        ref_pos = ref_pos_ego / self.denorm_scale[None, None, :] # normalize
         
         for lid, layer in enumerate(self.bda_layers):
-            query_sine_embed = gen_sineembed_for_position(ec_ref_pos, hidden_dim=self.D, temperature=10000)
+            ref_pos_denorm = ref_pos * self.denorm_scale[None, None, :]
+            query_sine_embed = gen_sineembed_for_position(ref_pos_denorm, hidden_dim=self.D, temperature=10000)
             
-            output = layer(output, query_sine_embed, ec_ref_pos, bev_feat, lid)
+            output = layer(output, query_sine_embed, ref_pos, bev_feat, lid)
             
             if self.refine_share_param:
                 tmp = self.ref_pos_refine(output)
             else:
                 tmp = self.ref_pos_refine[lid](output)
                 
-            ec_ref_pos = torch.tanh(tmp * 0.5 + ec_ref_pos)
+            ref_pos = tmp.tanh() * 0.5 + ref_pos
             
-        ref_pos_out = ec_ref_pos * self.denorm_scale[None, None, :]
+        ref_pos_out = ref_pos * self.denorm_scale[None, None, :]
         return output, ref_pos_out
