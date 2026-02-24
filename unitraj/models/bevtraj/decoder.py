@@ -11,23 +11,22 @@ from unitraj.models.bevtraj.decoder_deform_attn import BEVDeformCrossAttn
 from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead
 from unitraj.models.bevtraj.utility import gen_sineembed_for_position, ego_to_target, target_to_ego
 
-
-class TemporalPositionalEncoding(nn.Module):
-
-    def __init__(self, d_model, dropout=0.1, future_len=12, temperature=500.0):
+    
+class ModeSeperationEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, mode_num=10, temperature=500.0):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-        self.T = future_len
-        pe = torch.zeros(future_len, d_model)
-        position = torch.arange(0, future_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(temperature) / d_model))
+
+        pe = torch.zeros(mode_num, d_model)
+        position = torch.arange(0, mode_num).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, d_model, 2).float()
+                             * (-math.log(temperature) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_parameter('pe', nn.Parameter(pe, requires_grad=False))
+        self.register_buffer("pe", pe.unsqueeze(0).unsqueeze(0))
 
     def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
+        x = x + self.pe
         return self.dropout(x)
 
 
@@ -112,7 +111,7 @@ class BEVTrajDecoder(nn.Module):
         self.K = config['num_modes']
         self.target_attr = config['target_attr']
         self.query_scale_dims = config['query_scale_dims']
-        self.tem_pos_T = config['tem_pos_T']
+        self.mode_pos_T = config['mode_pos_T']
         self.spa_pos_T = config['spa_pos_T']
         self.dropout = config['dropout']
         self.L_goal_proposal = config['num_goal_proposal_layers']
@@ -194,7 +193,7 @@ class BEVTrajDecoder(nn.Module):
 
         # ============================ Iterative Refinement ============================
         
-        # self.temp_pos_enc = TemporalPositionalEncoding(self.D, self.dropout, future_len=self.T, temperature=self.tem_pos_T)
+        self.mode_sep_enc = ModeSeperationEncoding(self.D, self.dropout, mode_num=self.K, temperature=self.mode_pos_T)
         self.get_query_scale_T = MLP(self.query_scale_dims, self.query_scale_dims, self.query_scale_dims, 2)
         
         dec_layer = BEVTrajDecoderLayer(self.dec_layer_config)
@@ -317,8 +316,10 @@ class BEVTrajDecoder(nn.Module):
         mode_probs = [init_mode_prob]
         pred_trajs = [init_pred_traj.permute(0, 2, 1, 3)]
         
-        dec_embed = dec_embed.permute(2, 1, 0, 3).reshape(self.T, B*self.K, -1)
-        # dec_embed = self.temp_pos_enc(dec_embed)
+        # mode seperation encoding
+        dec_embed = dec_embed.permute(2, 1, 0, 3) # (T, B, K, -1)
+        dec_embed = self.mode_sep_enc(dec_embed).reshape(self.T, B * self.K, -1)
+
         for layer in self.dec_layers:
             query_scale = self.get_query_scale_T(dec_embed)
             dec_embed = layer(

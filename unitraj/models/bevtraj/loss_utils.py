@@ -168,7 +168,7 @@ class Criterion(nn.Module):
             
             layer_loss = self.config['goal_reg_weight'] * reg_loss + self.config['disp_weight'] * disp_loss
             total_loss = total_loss + layer_loss
-        return total_loss
+        return (total_loss / num_layers)
 
     def get_dense_future_prediction_loss(self, prediction, gt):
         obj_trajs_future_state = gt['obj_trajs_future_state']

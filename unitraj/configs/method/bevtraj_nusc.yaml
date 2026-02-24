@@ -203,7 +203,7 @@ MODEL:
         num_modes: 10
         target_attr: &target_attr 9
         query_scale_dims: 256
-        tem_pos_T: 10000
+        mode_pos_T: 10000
         spa_pos_T: 10000
 
         dropout: 0.1
