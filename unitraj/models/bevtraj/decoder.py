@@ -296,7 +296,7 @@ class BEVTrajDecoder(nn.Module):
         scene_context = scene_context.permute(1, 0, 2)
 
         # -------------------- Goal Proposal BDA --------------------
-        bda_token, bda_sgcp_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn)
+        bda_token, bda_sgcp_pos = self.bda_sgcp(bev_feat, ego_dyn)
 
         trans_x, trans_y, rot_sin, rot_cos = (
             ego_dyn['ego_x'],
