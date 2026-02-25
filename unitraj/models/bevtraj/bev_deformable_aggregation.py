@@ -260,31 +260,49 @@ class BDA_ENC(BEVDeformableAggregation):
                 ego_dyn['ego_sin'],
                 ego_dyn['ego_cos'],
             )
-            ref_pos_ego = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
-            ref_pos = ref_pos_ego / self.denorm_scale[None, None, :] # normalize
+            # ref_pos_ego = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
+            # ref_pos = ref_pos_ego / self.denorm_scale[None, None, :] # normalize
+            ref_pos = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
         else:
             B = bev_feat.shape[0]
-            ref_pos = self.ref_pos[None].repeat(B, 1, 1)
+            ref_pos_norm = self.ref_pos[None].repeat(B, 1, 1)
+            ref_pos = ref_pos_norm * self.denorm_scale[None, None, :]
         
         # BEV Deformable Aggregation
         output = self.ba_query[None].repeat(B, 1, 1)
         
+        # for lid, layer in enumerate(self.bda_layers):
+        #     ref_pos_denorm = ref_pos * self.denorm_scale[None, None, :]
+        #     query_sine_embed = gen_sineembed_for_position(ref_pos_denorm, hidden_dim=self.D, temperature=10000)
+        #     query_pos = self.pos_scale(output) * self.query_pos(query_sine_embed)
+            
+        #     output = layer(output, query_pos, ref_pos, bev_feat)
+            
+        #     if self.refine_share_param:
+        #         tmp = self.ref_pos_refine(output)
+        #     else:
+        #         tmp = self.ref_pos_refine[lid](output)
+                
+        #     ref_pos = tmp.tanh() * 0.5 + ref_pos
+            
+        # ref_pos_out = ref_pos * self.denorm_scale[None, None, :]
+        # return output, ref_pos_out
+
         for lid, layer in enumerate(self.bda_layers):
-            ref_pos_denorm = ref_pos * self.denorm_scale[None, None, :]
-            query_sine_embed = gen_sineembed_for_position(ref_pos_denorm, hidden_dim=self.D, temperature=10000)
+            query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
             query_pos = self.pos_scale(output) * self.query_pos(query_sine_embed)
             
-            output = layer(output, query_pos, ref_pos, bev_feat)
+            ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
+            output = layer(output, query_pos, ref_pos_norm, bev_feat)
             
             if self.refine_share_param:
                 tmp = self.ref_pos_refine(output)
             else:
                 tmp = self.ref_pos_refine[lid](output)
                 
-            ref_pos = tmp.tanh() * 0.5 + ref_pos
+            ref_pos = tmp * 0.5 + ref_pos  # hard code for training stability (todo: use tanh)
             
-        ref_pos_out = ref_pos * self.denorm_scale[None, None, :]
-        return output, ref_pos_out
+        return output, ref_pos
 
 
 class BDA_DEC(BEVDeformableAggregation):
@@ -315,21 +333,38 @@ class BDA_DEC(BEVDeformableAggregation):
             ego_dyn['ego_sin'],
             ego_dyn['ego_cos'],
         )
-        ref_pos_ego = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
-        ref_pos = ref_pos_ego / self.denorm_scale[None, None, :] # normalize
+        # ref_pos_ego = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
+        # ref_pos = ref_pos_ego / self.denorm_scale[None, None, :] # normalize
+        ref_pos = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
         
-        for lid, layer in enumerate(self.bda_layers):
-            ref_pos_denorm = ref_pos * self.denorm_scale[None, None, :]
-            query_sine_embed = gen_sineembed_for_position(ref_pos_denorm, hidden_dim=self.D, temperature=10000)
+        # for lid, layer in enumerate(self.bda_layers):
+        #     ref_pos_denorm = ref_pos * self.denorm_scale[None, None, :]
+        #     query_sine_embed = gen_sineembed_for_position(ref_pos_denorm, hidden_dim=self.D, temperature=10000)
             
-            output = layer(output, query_sine_embed, ref_pos, bev_feat, lid)
+        #     output = layer(output, query_sine_embed, ref_pos, bev_feat, lid)
+            
+        #     if self.refine_share_param:
+        #         tmp = self.ref_pos_refine(output)
+        #     else:
+        #         tmp = self.ref_pos_refine[lid](output)
+                
+        #     ref_pos = tmp.tanh() * 0.5 + ref_pos
+            
+        # ref_pos_out = ref_pos * self.denorm_scale[None, None, :]
+        # return output, ref_pos_out
+
+        for lid, layer in enumerate(self.bda_layers):
+            query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
+            query_pos = self.pos_scale(output) * self.query_pos(query_sine_embed)
+            
+            ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
+            output = layer(output, query_pos, ref_pos_norm, bev_feat)
             
             if self.refine_share_param:
                 tmp = self.ref_pos_refine(output)
             else:
                 tmp = self.ref_pos_refine[lid](output)
                 
-            ref_pos = tmp.tanh() * 0.5 + ref_pos
+            ref_pos = tmp * 0.5 + ref_pos  # hard code for training stability (todo: use tanh)
             
-        ref_pos_out = ref_pos * self.denorm_scale[None, None, :]
-        return output, ref_pos_out
+        return output, ref_pos
