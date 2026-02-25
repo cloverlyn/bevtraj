@@ -8,7 +8,10 @@ from unitraj.models.bevtraj.pre_encoder import BEVTrajPreEncoder
 from unitraj.models.bevtraj.scene_context_encoder import BEVTrajSceneContextEncoder
 from unitraj.models.bevtraj.decoder import BEVTrajDecoder
 from unitraj.models.bevtraj.custom_lr_sched import WarmupCosLR
-from unitraj.models.bevtraj.base_model_local import BaseModel
+try:
+    from unitraj.models.base_model import BaseModel
+except:
+    from unitraj.models.bevtraj.base_model_local import BaseModel
 
 
 class BEVTraj(BaseModel):
