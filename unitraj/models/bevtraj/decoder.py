@@ -12,22 +12,22 @@ from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead
 from unitraj.models.bevtraj.utility import gen_sineembed_for_position, ego_to_target, target_to_ego
 
     
-class ModeSeperationEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, mode_num=10, temperature=500.0):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
+# class ModeSeperationEncoding(nn.Module):
+#     def __init__(self, d_model, dropout=0.1, mode_num=10, temperature=500.0):
+#         super().__init__()
+#         self.dropout = nn.Dropout(p=dropout)
 
-        pe = torch.zeros(mode_num, d_model)
-        position = torch.arange(0, mode_num).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float()
-                             * (-math.log(temperature) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0).unsqueeze(0))
+#         pe = torch.zeros(mode_num, d_model)
+#         position = torch.arange(0, mode_num).unsqueeze(1).float()
+#         div_term = torch.exp(torch.arange(0, d_model, 2).float()
+#                              * (-math.log(temperature) / d_model))
+#         pe[:, 0::2] = torch.sin(position * div_term)
+#         pe[:, 1::2] = torch.cos(position * div_term)
+#         self.register_buffer("pe", pe.unsqueeze(0).unsqueeze(0))
 
-    def forward(self, x):
-        x = x + self.pe
-        return self.dropout(x)
+#     def forward(self, x):
+#         x = x + self.pe
+#         return self.dropout(x)
 
 
 class BEVTrajDecoderLayer(nn.Module):
@@ -167,10 +167,11 @@ class BEVTrajDecoder(nn.Module):
                     'ffn': FFN(self.D, self.ffn_D, 2),
                     'norm3': nn.LayerNorm(self.D),
 
-                    'goal_reg': MLP(self.D, self.D, 2, 2),
+                    # 'goal_reg': MLP(self.D, self.D, 2, 2),
                 })
             )
 
+        self.goal_reg = MLP(self.D, self.D, 2, 2)
         self.goal_FDE = MLP(self.D, self.D, 1, 2)
 
         self.grid_size = config['grid_size']
@@ -193,7 +194,7 @@ class BEVTrajDecoder(nn.Module):
 
         # ============================ Iterative Refinement ============================
         
-        self.mode_sep_enc = ModeSeperationEncoding(self.D, self.dropout, mode_num=self.K, temperature=self.mode_pos_T)
+        # self.mode_sep_enc = ModeSeperationEncoding(self.D, self.dropout, mode_num=self.K, temperature=self.mode_pos_T)
         self.get_query_scale_T = MLP(self.query_scale_dims, self.query_scale_dims, self.query_scale_dims, 2)
         
         dec_layer = BEVTrajDecoderLayer(self.dec_layer_config)
@@ -217,8 +218,8 @@ class BEVTrajDecoder(nn.Module):
         k = torch.cat([bda_token, pos_k], dim=-1).permute(1, 0, 2)
         v = bda_token.permute(1, 0, 2)
 
-        goal_reg_list = []
-        goal_FDE_list = []
+        # goal_reg_list = []
+        # goal_FDE_list = []
         for i, layer in enumerate(self.goal_proposal):
             if i==0:
                 src = self.Q.expand(-1, B, -1)
@@ -226,17 +227,17 @@ class BEVTrajDecoder(nn.Module):
                 
             else:
                 src = mode_q
-                goal_reg_pos = gen_sineembed_for_position(goal_reg, hidden_dim=self.D, temperature=temperature)
-                mode_q = mode_q + goal_reg_pos
+                # goal_reg_pos = gen_sineembed_for_position(goal_reg, hidden_dim=self.D, temperature=temperature)
+                # mode_q = mode_q + goal_reg_pos
             
             mode_q = layer['self_attn'](mode_q, mode_q, mode_q)[0] + src
             mode_q = layer['norm1'](mode_q)
             
-            if i==0:
-                q = torch.cat([mode_q, d_c], dim=-1)
+            # if i==0:
+            q = torch.cat([mode_q, d_c], dim=-1)
             
-            else:
-                q = torch.cat([mode_q, goal_reg_pos], dim=-1)
+            # else:
+            #     q = torch.cat([mode_q, goal_reg_pos], dim=-1)
 
             q = layer['cross_attn'](q, k, v)[0]
             q = layer['q_proj'](q)
@@ -244,19 +245,21 @@ class BEVTrajDecoder(nn.Module):
             mode_q = layer['norm3'](layer['ffn'](mode_q))
 
             # goal_reg = layer['goal_reg'](mode_q)
-            if i==0:
-                goal_reg = layer['goal_reg'](mode_q).tanh() * self.denorm_scale[None, None, :]
-            else:
-                tmp = layer['goal_reg'](mode_q) * 3.0    # hard code
-                goal_reg = ref_pos + tmp
+            # if i==0:
+            #     goal_reg = layer['goal_reg'](mode_q).tanh() * self.denorm_scale[None, None, :]
+            # else:
+            #     tmp = layer['goal_reg'](mode_q) * 3.0    # hard code
+            #     goal_reg = ref_pos + tmp
 
-            goal_reg_list.append(goal_reg)
-            ref_pos = goal_reg.detach()
+            # goal_reg_list.append(goal_reg)
+            # ref_pos = goal_reg.detach()
 
-            goal_FDE = self.goal_FDE(mode_q).squeeze(-1).T
-            goal_FDE_list.append(goal_FDE)
+            # goal_FDE = self.goal_FDE(mode_q).squeeze(-1).T
+            # goal_FDE_list.append(goal_FDE)
+        goal_reg = self.goal_reg(mode_q).tanh() * self.denorm_scale[None, None, :]
+        goal_FDE = self.goal_FDE(mode_q).squeeze(-1).T
 
-        return mode_q, goal_reg_list, goal_FDE_list
+        return mode_q, goal_reg, goal_FDE
 
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
         K, B, _ = mode_query.shape
@@ -296,7 +299,7 @@ class BEVTrajDecoder(nn.Module):
         scene_context = scene_context.permute(1, 0, 2)
 
         # -------------------- Goal Proposal BDA --------------------
-        bda_token, bda_sgcp_pos = self.bda_sgcp(bev_feat, ego_dyn)
+        bda_token, bda_sgcp_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
         trans_x, trans_y, rot_sin, rot_cos = (
             ego_dyn['ego_x'],
@@ -306,8 +309,8 @@ class BEVTrajDecoder(nn.Module):
         )
         bda_sgcp_pos = ego_to_target(bda_sgcp_pos, trans_x, trans_y, rot_sin, rot_cos)
 
-        mode_query, goal_reg_list, goal_FDE_list = self.goal_candidate_proposal(tc_dyn, bda_token, bda_sgcp_pos)
-        goal_candidate = goal_reg_list[-1].detach()
+        mode_query, goal_reg, goal_FDE = self.goal_candidate_proposal(tc_dyn, bda_token, bda_sgcp_pos)
+        goal_candidate = goal_reg.detach()
 
         # -------------------- Initial Prediction --------------------
         dec_embed, init_mode_prob, init_pred_traj = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
@@ -317,8 +320,9 @@ class BEVTrajDecoder(nn.Module):
         pred_trajs = [init_pred_traj.permute(0, 2, 1, 3)]
         
         # mode seperation encoding
-        dec_embed = dec_embed.permute(2, 1, 0, 3) # (T, B, K, -1)
-        dec_embed = self.mode_sep_enc(dec_embed).reshape(self.T, B * self.K, -1)
+        # dec_embed = dec_embed.permute(2, 1, 0, 3) # (T, B, K, -1)
+        # dec_embed = self.mode_sep_enc(dec_embed).reshape(self.T, B * self.K, -1)
+        dec_embed = dec_embed.permute(2, 1, 0, 3).reshape(self.T, B * self.K, -1)
 
         for layer in self.dec_layers:
             query_scale = self.get_query_scale_T(dec_embed)
@@ -345,7 +349,7 @@ class BEVTrajDecoder(nn.Module):
             
         output = {'predicted_probability': mode_probs,
                   'predicted_trajectory': pred_trajs,
-                  'predicted_goal_FDE': goal_FDE_list,
-                  'predicted_goal_reg': goal_reg_list}
+                  'predicted_goal_FDE': goal_FDE,
+                  'predicted_goal_reg': goal_reg}
         return output
     

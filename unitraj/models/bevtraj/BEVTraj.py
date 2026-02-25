@@ -3,13 +3,12 @@ import torch.nn as nn
 
 from omegaconf import OmegaConf
 
-from unitraj.models.bevtraj.bevfusion import BEVFusion
 from unitraj.models.bevtraj.loss_utils import Criterion
 from unitraj.models.bevtraj.pre_encoder import BEVTrajPreEncoder
 from unitraj.models.bevtraj.scene_context_encoder import BEVTrajSceneContextEncoder
 from unitraj.models.bevtraj.decoder import BEVTrajDecoder
 from unitraj.models.bevtraj.custom_lr_sched import WarmupCosLR
-from unitraj.models.base_model import BaseModel
+from unitraj.models.bevtraj.base_model_local import BaseModel
 
 
 class BEVTraj(BaseModel):
@@ -25,8 +24,7 @@ class BEVTraj(BaseModel):
         sc_feat_dim = config['SCENE_CONTEXT_ENCODER']['d_model']
         dec_dim = config['DECODER']['d_model']
         
-        self.pre_encoder = BEVTrajPreEncoder(self.config['PRE_ENCODER']) 
-        self.sensor_encoder = BEVFusion(**self.config['SENSOR_ENCODER'])
+        self.pre_encoder = BEVTrajPreEncoder(self.config['PRE_ENCODER'])
         self.scene_context_encoder = BEVTrajSceneContextEncoder(
                         self.config['SCENE_CONTEXT_ENCODER'], config['PRE_ENCODER']['d_model'], bev_feat_dim)
         self.decoder = BEVTrajDecoder(self.config['DECODER'])
@@ -47,12 +45,17 @@ class BEVTraj(BaseModel):
         
     def forward(self, batch):
         traj_data = batch['traj_data']['input_dict']
-        sensor_data = batch['sensor_data']
+        # bev_feat_raw = batch['bev_feat']
         ec_dynamics, tc_dynamics, ego_dynamics = self.prepare_decoder_input(traj_data)
         
         # encoding
         pre_encoder_emb = self.pre_encoder(traj_data)
-        bev_feature, seg_loss = self.sensor_encoder.get_bev_feature(sensor_data['batch_input_dict'], sensor_data['data_samples'])
+        
+        # bev_feature, seg_loss = self.sensor_encoder.get_bev_feature(sensor_data['batch_input_dict'], sensor_data['data_samples'])
+        # bev_feature = self.sensor_encoder.get_bev_feature(bev_feat_raw)[0]
+        B = pre_encoder_emb.shape[0]
+        bev_feature = torch.randn(B, 512, 128, 128, device=pre_encoder_emb.device)
+
         scene_context_feature, dense_future_pred = self.scene_context_encoder(traj_data, pre_encoder_emb, bev_feature, ego_dynamics)
         
         # decoding
@@ -68,7 +71,7 @@ class BEVTraj(BaseModel):
         last_traj = output['predicted_trajectory'][-1].permute(2, 0, 1, 3)
         prediction = {'predicted_probability': last_prob, 'predicted_trajectory': last_traj, 'dense_future_pred': dense_future_pred}
         
-        return prediction, loss + seg_loss
+        return prediction, loss
 
     
     def get_loss(self, traj_data, prediction):
@@ -130,12 +133,10 @@ class BEVTraj(BaseModel):
     
     def training_step(self, batch, batch_idx):
         prediction, loss = self.forward(batch)
-        self.compute_official_evaluation(batch, prediction)
         self.log_info(batch['traj_data'], batch_idx, prediction, status='train')
         return loss
 
     def validation_step(self, batch, batch_idx):
         prediction, loss = self.forward(batch)
-        self.compute_official_evaluation(batch, prediction)
         self.log_info(batch['traj_data'], batch_idx, prediction, status='val')
         return loss

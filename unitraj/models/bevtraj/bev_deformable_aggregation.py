@@ -270,23 +270,6 @@ class BDA_ENC(BEVDeformableAggregation):
         
         # BEV Deformable Aggregation
         output = self.ba_query[None].repeat(B, 1, 1)
-        
-        # for lid, layer in enumerate(self.bda_layers):
-        #     ref_pos_denorm = ref_pos * self.denorm_scale[None, None, :]
-        #     query_sine_embed = gen_sineembed_for_position(ref_pos_denorm, hidden_dim=self.D, temperature=10000)
-        #     query_pos = self.pos_scale(output) * self.query_pos(query_sine_embed)
-            
-        #     output = layer(output, query_pos, ref_pos, bev_feat)
-            
-        #     if self.refine_share_param:
-        #         tmp = self.ref_pos_refine(output)
-        #     else:
-        #         tmp = self.ref_pos_refine[lid](output)
-                
-        #     ref_pos = tmp.tanh() * 0.5 + ref_pos
-            
-        # ref_pos_out = ref_pos * self.denorm_scale[None, None, :]
-        # return output, ref_pos_out
 
         for lid, layer in enumerate(self.bda_layers):
             query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
@@ -300,7 +283,7 @@ class BDA_ENC(BEVDeformableAggregation):
             else:
                 tmp = self.ref_pos_refine[lid](output)
                 
-            ref_pos = tmp * 0.5 + ref_pos  # hard code for training stability (todo: use tanh)
+            ref_pos = tmp + ref_pos  # todo: use tanh
             
         return output, ref_pos
 
@@ -312,6 +295,18 @@ class BDA_DEC(BEVDeformableAggregation):
         self.t = config['past_len']
         self.t_D = config['t_dims']
 
+        self.dynamics_enc = nn.ModuleDict({
+            'ec': MLP(self.config['target_attr'], self.D, self.t_D, 2),
+            'ec_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
+            'ec_q': QueryConditionedDynamics(self.D, self.D),
+            'ec_to_pos': MLP(self.D, self.D, 2, 2),
+            'tc': MLP(self.config['target_attr'], self.D, self.t_D, 2),
+            'tc_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
+            'tc_q': QueryConditionedDynamics(self.D, self.D),
+            # 'tc_to_pos': MLP(self.D, self.D, 2, 2),
+            'hyb': MLP(self.D + self.D, self.D, self.D, 3),
+        })
+
         self.bda_layers = nn.ModuleList([
             BDALayer_DEC(self.config['bda_layer'], self.D, self.grid_size)
             for _ in range(self.config['num_bda_layers'])
@@ -321,8 +316,9 @@ class BDA_DEC(BEVDeformableAggregation):
         with open(file_path, 'rb') as f:
             anchors = pickle.load(f)
         self.register_buffer('anchors', torch.from_numpy(anchors['VEHICLE']).float())
+        # self.anchors = nn.Parameter(torch.from_numpy(anchors['VEHICLE']).float())
 
-    def forward(self, bev_feat, ego_dyn):
+    def forward(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
         B = bev_feat.shape[0]
         output = self.ba_query[None].repeat(B, 1, 1)
         ref_pos_target = self.anchors[None].repeat(B, 1, 1)
@@ -333,25 +329,24 @@ class BDA_DEC(BEVDeformableAggregation):
             ego_dyn['ego_sin'],
             ego_dyn['ego_cos'],
         )
-        # ref_pos_ego = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
-        # ref_pos = ref_pos_ego / self.denorm_scale[None, None, :] # normalize
         ref_pos = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
+
+        # =============================== prototype ================================
+
+        ec_d = self.dynamics_enc['ec'](ec_dyn).reshape(B, -1) # (B, t_D * t)
+        ec_d = self.dynamics_enc['ec_t'](ec_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
+        ec_d = self.dynamics_enc['ec_q'](ec_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
         
-        # for lid, layer in enumerate(self.bda_layers):
-        #     ref_pos_denorm = ref_pos * self.denorm_scale[None, None, :]
-        #     query_sine_embed = gen_sineembed_for_position(ref_pos_denorm, hidden_dim=self.D, temperature=10000)
-            
-        #     output = layer(output, query_sine_embed, ref_pos, bev_feat, lid)
-            
-        #     if self.refine_share_param:
-        #         tmp = self.ref_pos_refine(output)
-        #     else:
-        #         tmp = self.ref_pos_refine[lid](output)
-                
-        #     ref_pos = tmp.tanh() * 0.5 + ref_pos
-            
-        # ref_pos_out = ref_pos * self.denorm_scale[None, None, :]
-        # return output, ref_pos_out
+        ec_pos = self.dynamics_enc['ec_to_pos'](ec_d).tanh() * self.denorm_scale[None, None, :]
+        ec_pos= gen_sineembed_for_position(ec_pos, hidden_dim=self.D, temperature=10000)
+        
+        tc_d = self.dynamics_enc['tc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
+        tc_d = self.dynamics_enc['tc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
+        tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
+                    
+        output = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)) # (B, num_ba_query, D)
+
+        # ==========================================================================
 
         for lid, layer in enumerate(self.bda_layers):
             query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
@@ -364,6 +359,6 @@ class BDA_DEC(BEVDeformableAggregation):
             else:
                 tmp = self.ref_pos_refine[lid](output)
                 
-            ref_pos = tmp * 0.5 + ref_pos  # hard code for training stability (todo: use tanh)
+            ref_pos = tmp + ref_pos  # todo: use tanh
             
         return output, ref_pos
