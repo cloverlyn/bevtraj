@@ -355,10 +355,9 @@ class BDA_DEC(BEVDeformableAggregation):
 
         for lid, layer in enumerate(self.bda_layers):
             query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
-            query_pos = self.pos_scale(output) * self.query_pos(query_sine_embed)
             
             ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
-            output = layer(output, query_pos, ref_pos_norm, bev_feat)
+            output = layer(output, query_sine_embed, ref_pos_norm, bev_feat, lid)
             
             if self.refine_share_param:
                 tmp = self.ref_pos_refine(output)
