@@ -167,14 +167,14 @@ class BEVDeformableAggregation(nn.Module, ABC):
         
         self.ba_query = nn.Parameter(torch.zeros(self.num_ba_query, self.D), requires_grad=True)
 
-        refine_layer = MLP(self.D, self.D, 2, 3)
-        nn.init.zeros_(refine_layer.layers[-1].weight)
-        nn.init.zeros_(refine_layer.layers[-1].bias)
+        # refine_layer = MLP(self.D, self.D, 2, 3)
+        # nn.init.zeros_(refine_layer.layers[-1].weight)
+        # nn.init.zeros_(refine_layer.layers[-1].bias)
         
-        if self.refine_share_param:
-            self.ref_pos_refine = refine_layer
-        else:
-            self.ref_pos_refine = _get_clones(refine_layer, self.config['num_bda_layers'])
+        # if self.refine_share_param:
+        #     self.ref_pos_refine = refine_layer
+        # else:
+        #     self.ref_pos_refine = _get_clones(refine_layer, self.config['num_bda_layers'])
             
         self.register_buffer('denorm_scale', torch.tensor(self.grid_size, dtype=torch.float32))
     
@@ -263,6 +263,7 @@ class BDA_ENC(BEVDeformableAggregation):
             # ref_pos_ego = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
             # ref_pos = ref_pos_ego / self.denorm_scale[None, None, :] # normalize
             ref_pos = target_to_ego(ref_pos_target, trans_x, trans_y, rot_sin, rot_cos)
+            ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
         else:
             B = bev_feat.shape[0]
             ref_pos_norm = self.ref_pos[None].repeat(B, 1, 1)
@@ -270,20 +271,20 @@ class BDA_ENC(BEVDeformableAggregation):
         
         # BEV Deformable Aggregation
         output = self.ba_query[None].repeat(B, 1, 1)
+        query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
+        pos_q = self.query_pos(query_sine_embed)
 
         for lid, layer in enumerate(self.bda_layers):
-            query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
-            query_pos = self.pos_scale(output) * self.query_pos(query_sine_embed)
-            
-            ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
+            query_pos = self.pos_scale(output) * pos_q
+
             output = layer(output, query_pos, ref_pos_norm, bev_feat)
             
-            if self.refine_share_param:
-                tmp = self.ref_pos_refine(output)
-            else:
-                tmp = self.ref_pos_refine[lid](output)
+            # if self.refine_share_param:
+            #     tmp = self.ref_pos_refine(output)
+            # else:
+            #     tmp = self.ref_pos_refine[lid](output)
                 
-            ref_pos = tmp + ref_pos  # todo: use tanh
+            # ref_pos = tmp + ref_pos  # todo: use tanh
             
         return output, ref_pos
 
@@ -346,19 +347,19 @@ class BDA_DEC(BEVDeformableAggregation):
                     
         output = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)) # (B, num_ba_query, D)
 
+        ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
+        query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
         # ==========================================================================
 
         for lid, layer in enumerate(self.bda_layers):
-            query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
             
-            ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
             output = layer(output, query_sine_embed, ref_pos_norm, bev_feat, lid)
             
-            if self.refine_share_param:
-                tmp = self.ref_pos_refine(output)
-            else:
-                tmp = self.ref_pos_refine[lid](output)
+            # if self.refine_share_param:
+            #     tmp = self.ref_pos_refine(output)
+            # else:
+            #     tmp = self.ref_pos_refine[lid](output)
                 
-            ref_pos = tmp + ref_pos  # todo: use tanh
+            # ref_pos = tmp + ref_pos  # todo: use tanh
             
-        return output, ref_pos
+        return output, ref_pos_target

@@ -22,8 +22,10 @@ class Criterion(nn.Module):
     def forward(self, out, gt, center_gt_final_valid_idx, traj_data):
         modes_preds = out['predicted_probability'] # [B, K]
         preds = out['predicted_trajectory'] # [K, T, B, 5]
-        goal_FDE = out['predicted_goal_FDE'] # [B, K]
-        goal_reg = out['predicted_goal_reg'] # [K, B, 2]
+        # goal_FDE = out['predicted_goal_FDE'] # [B, K]
+        # goal_reg = out['predicted_goal_reg'] # [K, B, 2]
+        goal_prob = out['goal_prob']
+        anchor_pos = out['anchor_pos']
         dense_future_pred = out['dense_future_pred']
         gt_decoder = gt[0]
         gt_dense_future_trajs = gt[1]
@@ -33,9 +35,15 @@ class Criterion(nn.Module):
             layer_loss = self.nll_loss_multimodes(mode_pred, pred, gt_decoder, center_gt_final_valid_idx, traj_data)
             total_loss += layer_loss
 
-        goal_prediction_loss = self.get_goal_prediction_loss(goal_reg, goal_FDE, gt_decoder, traj_data)
+        # goal_prediction_loss = self.get_goal_prediction_loss(goal_reg, goal_FDE, gt_decoder, traj_data)
+        goal_prob_loss = self.get_goal_prob_loss(
+            goal_prob=goal_prob,
+            goal_anchor=anchor_pos,
+            gt=gt_decoder,
+            center_gt_final_valid_idx=center_gt_final_valid_idx,
+        )
         dense_future_loss = self.get_dense_future_prediction_loss(dense_future_pred, gt_dense_future_trajs)
-        total_loss = total_loss / len(preds) + goal_prediction_loss + dense_future_loss
+        total_loss = total_loss / len(preds) + goal_prob_loss + dense_future_loss
         return total_loss
 
     def get_BVG_distributions(self, pred):
@@ -188,6 +196,51 @@ class Criterion(nn.Module):
         
         total_loss = self.config['goal_reg_weight'] * reg_loss + self.config['disp_weight'] * disp_loss
         return total_loss
+    
+    def get_goal_prob_loss(
+        self,
+        goal_prob,                  # [B, N] (prior over goal anchors)
+        goal_anchor,                # [B, N, 2] (anchor positions in target coord)
+        gt,                         # [B, T, 3] (x, y, valid)
+        center_gt_final_valid_idx,  # [B]
+    ):
+        eps = 1e-9
+        entropy_weight = self.config['entropy_weight']
+        kl_weight = self.config['kl_weight']
+        sigma = self.config.get('goal_prob_sigma', 2.0)  # meter scale
+
+        B, N = goal_prob.shape
+        device = goal_prob.device
+        b_idx = torch.arange(B, device=device)
+
+        # per-sample final valid GT goal
+        gt_goal = gt[b_idx, center_gt_final_valid_idx.long(), :2]                  # [B, 2]
+        valid_final = gt[b_idx, center_gt_final_valid_idx.long(), -1].float()      # [B]
+
+        # likelihood p(goal_gt | anchor_n): isotropic Gaussian (in log-space, const dropped)
+        sq_dist = ((goal_anchor - gt_goal.unsqueeze(1)) ** 2).sum(dim=-1)          # [B, N]
+        log_lik = -0.5 * sq_dist / (sigma ** 2)                                     # [B, N]
+
+        # posterior q(n) ∝ p(goal_gt | n) * p(n)
+        prior = goal_prob.clamp_min(eps)
+        log_post_unnorm = log_lik + torch.log(prior)
+        log_post = log_post_unnorm - torch.logsumexp(log_post_unnorm, dim=-1, keepdim=True)
+        post_pr = torch.exp(log_post)                                               # [B, N]
+
+        # expected negative log-likelihood under posterior
+        nll = ((-log_lik) * post_pr).sum(dim=-1)                                    # [B]
+        nll = (nll * valid_final).sum() / valid_final.sum().clamp_min(1.0)
+
+        # posterior entropy (encourage confident assignment)
+        post_entropy = -(post_pr * torch.log(post_pr.clamp_min(eps))).sum(dim=-1)   # [B]
+        post_entropy = (post_entropy * valid_final).sum() / valid_final.sum().clamp_min(1.0)
+
+        # KL(post || prior), same style as nll_loss_multimodes
+        kl_loss_fn = torch.nn.KLDivLoss(reduction='batchmean')
+        kl_loss = kl_loss_fn(torch.log(prior), post_pr)
+
+        return nll + entropy_weight * post_entropy + kl_weight * kl_loss
+
 
     def get_dense_future_prediction_loss(self, prediction, gt):
         obj_trajs_future_state = gt['obj_trajs_future_state']
