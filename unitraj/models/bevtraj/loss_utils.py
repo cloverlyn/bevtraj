@@ -75,8 +75,10 @@ class Criterion(nn.Module):
             pred_trajs = pred.permute(2, 0, 1, 3).contiguous()
 
             # MTR nll_loss_gmm_direct expects log_std, but MotionRegHead outputs sigma
-            pred_trajs_gmm = pred_trajs.clone()
-            pred_trajs_gmm[..., 2:4] = torch.log(pred_trajs_gmm[..., 2:4].clamp_min(1e-6))
+            mu = pred_trajs[..., :2]
+            log_std = torch.log(pred_trajs[..., 2:4].clamp_min(1e-6))
+            rho = pred_trajs[..., 4:5]
+            pred_trajs_gmm = torch.cat([mu, log_std, rho], dim=-1)
 
             loss_reg_gmm, hard_idx = self.nll_loss_gmm_direct(
                 pred_scores=pred_scores,                 # [B, K]
