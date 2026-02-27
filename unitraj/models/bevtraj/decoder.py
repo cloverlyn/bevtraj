@@ -231,11 +231,20 @@ class BEVTrajDecoder(nn.Module):
                 ego_dyn=ego_dyn)
             
             mode_prob = F.softmax(self.motion_cls(dec_embed), dim=0).squeeze(dim=-1).T
-            pred_traj = self.motion_reg(dec_embed)
+
+            ##
+            # pred_traj = self.motion_reg(dec_embed)
             
-            pred_traj[..., :2] += ref_points
-            new_ref_points = pred_traj[..., :2]
-            ref_points = new_ref_points.detach()
+            # pred_traj[..., :2] += ref_points
+            # new_ref_points = pred_traj[..., :2]
+            # ref_points = new_ref_points.detach()
+            ##
+
+            pred_traj_raw = self.motion_reg(dec_embed)          # [K, B, T, 5]
+            pred_xy = pred_traj_raw[..., :2] + ref_points       # out-of-place
+            pred_traj = torch.cat([pred_xy, pred_traj_raw[..., 2:]], dim=-1)
+            ref_points = pred_xy.detach().clone() 
+
             pred_traj = pred_traj.permute(0, 2, 1, 3)
                 
             mode_probs.append(mode_prob)

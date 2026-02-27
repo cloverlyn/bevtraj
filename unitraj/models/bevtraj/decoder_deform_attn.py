@@ -137,7 +137,7 @@ class BEVDeformCrossAttn(nn.Module):
             permute_pattern = (1, 0, 2)
             reshape_pattern = [(B, K, offset_groups, -1), (B, K, -1)]
             
-        dec_embed, query_scale, ref_points = map(lambda t: t.permute(*permute_pattern), (dec_embed, query_scale, ref_points))
+        dec_embed, query_scale, ref_points = map(lambda t: t.permute(*permute_pattern).contiguous(), (dec_embed, query_scale, ref_points))
         
         # get con_q & calculate offsets 
 
