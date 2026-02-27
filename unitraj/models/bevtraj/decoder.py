@@ -351,6 +351,7 @@ class BEVTrajDecoder(nn.Module):
                 #   'predicted_goal_reg': goal_reg
                   'goal_prob' : goal_prob,
                   'anchor_pos' : bda_pos,
+                  'goal_candidate': goal_candidate,
                 }
         return output
     

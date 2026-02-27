@@ -180,111 +180,167 @@ def draw_vehicle_box(ax, center_x, center_y, sin_theta, cos_theta,
 
 
 def visualize_prediction(batch, prediction, draw_index=0,
-                         window_size=40, x_offset=20, traj_color='#FF8C00'):
+                         window_size=40, x_offset=20,
+                         vis_dense_future=False):
 
-    def draw_line_with_mask(point1, point2, color, line_width=4):
-        ax.plot([point1[0], point2[0]], [point1[1], point2[1]], linewidth=line_width, color=color)
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    from matplotlib.colors import LinearSegmentedColormap
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+    def draw_line_with_mask(point1, point2, color, line_width=3):
+        ax.plot(
+            [point1[0], point2[0]],
+            [point1[1], point2[1]],
+            linewidth=line_width,
+            color=color,
+            zorder=1
+        )
+
+    # -----------------------------
+    # Data extraction
+    # -----------------------------
     batch = batch['input_dict']
+
     map_lanes = batch['map_polylines'][draw_index].cpu().numpy()
     map_mask = batch['map_polylines_mask'][draw_index].cpu().numpy()
     curr_traj = batch['obj_trajs'][draw_index][:, -1].cpu().numpy()
+
     pred_future_prob = prediction['predicted_probability'][draw_index].detach().cpu().numpy()
     pred_future_traj = prediction['predicted_trajectory'][draw_index].detach().cpu().numpy()
-    target_idx= batch['track_index_to_predict'][draw_index].item()
-    
-    if isinstance(prediction, dict):
-        prediction = prediction['predicted_trajectory']
-    pred_future_traj = prediction[draw_index].detach().cpu().numpy()
+    dense_future_pred = prediction['dense_future_pred'][draw_index].detach().cpu().numpy()
+    goal_reg = prediction['goal_reg'][:, draw_index].detach().cpu().numpy()
 
-    # make plot
+    target_idx = batch['track_index_to_predict'][draw_index].item()
+
+    # -----------------------------
+    # Figure setup
+    # -----------------------------
     _, ax = plt.subplots(figsize=(12, 12), dpi=300)
     ax.set_aspect('equal')
     ax.set_xlim(-window_size + x_offset, window_size + x_offset)
     ax.set_ylim(-window_size, window_size)
-    
-    # Plot the map with mask check
+
+    # -----------------------------
+    # Plot map
+    # -----------------------------
     map_xy = map_lanes[..., :2]
     map_type = map_lanes[..., 0, -20:]
 
     for idx, lane in enumerate(map_xy):
-        lane_type = map_type[idx]
-        lane_type = np.argmax(lane_type)
+        lane_type = np.argmax(map_type[idx])
         if lane_type in [1, 2, 3]:
             continue
         for i in range(len(lane) - 1):
             if map_mask[idx, i] and map_mask[idx, i + 1]:
                 draw_line_with_mask(lane[i], lane[i + 1], color='grey', line_width=3)
 
-    # draw trajectory of target agent
-    sorted_ids = np.argsort(pred_future_prob)[::-1]  
-    top6_ids = sorted_ids[:6]
-    
+    # -----------------------------
+    # Mode visualization settings
+    # -----------------------------
+    # mode_indices = [0, 1, 3, 5, 7, 9]
+    mode_indices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+    # categorical colormap for mode-wise distinction
+    mode_cmap = plt.get_cmap("tab10")
     time_cmap = LinearSegmentedColormap.from_list(
         "time_cmap",
         [(1.0, 1.0, 0.0), (1.0, 0.55, 0.0)]  # yellow → orange
     )
-              
-    for mode_idx in top6_ids:
-        traj = pred_future_traj[mode_idx][:, :2]           
+
+    # -----------------------------
+    # Draw future trajectories
+    # -----------------------------
+    for vis_i, mode_idx in enumerate(mode_indices):
+
+        traj = pred_future_traj[mode_idx][:, :2]
         prob = pred_future_prob[mode_idx]
-        alpha = 0.3 + 0.7 * prob
-        
+
+        base_color = mode_cmap(vis_i % 10)
+        # alpha = 0.25 + 0.6 * prob
+        alpha = 1
+
         T = traj.shape[0]
         time_colors = np.linspace(0, 1, T)
         rgba_colors = time_cmap(time_colors)
-        rgba_colors[:, 3] = alpha  # set alpha
-        
+        rgba_colors[:, :3] = base_color[:3]   # overwrite RGB per mode
+        rgba_colors[:, 3] = alpha
+
         ax.scatter(
             traj[:, 0], traj[:, 1],
-            s=70,
+            s=35,                    # ↓ thinner scatter
             marker='o',
             c=rgba_colors,
             edgecolors=rgba_colors,
-            linewidths=1.5,
+            linewidths=0.8,
             zorder=10
         )
 
-    # draw vehicle (2D box)
+        # goal point
+        goal_xy = goal_reg[mode_idx, :2]
+        ax.scatter(
+            goal_xy[0], goal_xy[1],
+            s=150,
+            marker='*',
+            color=base_color,
+            alpha=alpha,
+            zorder=20
+        )
+
+    # -----------------------------
+    # Draw vehicles
+    # -----------------------------
     for idx, traj in enumerate(curr_traj):
+
         if not np.isclose(traj[6], 1.0):
             continue
-        if np.isclose(traj[10], 1.0): vehicle_color = 'limegreen'
-        elif idx == target_idx: vehicle_color = 'indianred'
-        else: vehicle_color = 'cornflowerblue'
-        
-        draw_vehicle_box(ax, center_x=traj[0], center_y=traj[1], sin_theta=traj[-6], cos_theta=traj[-5], \
-                         color=vehicle_color, alpha=0.8)
-        
-    # Colorbars (Time, Probability)
+
+        if np.isclose(traj[10], 1.0):
+            vehicle_color = 'limegreen'
+        elif idx == target_idx:
+            vehicle_color = 'indianred'
+        else:
+            vehicle_color = 'cornflowerblue'
+
+        draw_vehicle_box(
+            ax,
+            center_x=traj[0],
+            center_y=traj[1],
+            sin_theta=traj[-6],
+            cos_theta=traj[-5],
+            color=vehicle_color,
+            alpha=0.8
+        )
+
+        if idx != target_idx and vis_dense_future:
+            single_traj = dense_future_pred[idx][:, :2]
+            T = single_traj.shape[0]
+            time_colors = np.linspace(0, 1, T)
+            rgba_colors = time_cmap(time_colors)
+            rgba_colors[:, 3] = 0.9
+
+            ax.scatter(
+                single_traj[:, 0], single_traj[:, 1],
+                s=8,
+                marker='o',
+                c=rgba_colors,
+                edgecolors='none',
+                zorder=5
+            )
+
+    # -----------------------------
+    # Colorbars
+    # -----------------------------
     divider = make_axes_locatable(ax)
     cax_time = divider.append_axes("right", size="5%", pad=0.5)
-    cax_prob = divider.append_axes("right", size="5%", pad=1.0)
 
-    # Time colorbar
     time_norm = mcolors.Normalize(vmin=0, vmax=1)
     cb_time = plt.colorbar(
         plt.cm.ScalarMappable(norm=time_norm, cmap=time_cmap),
         cax=cax_time
     )
-    cb_time.set_label("t+0s → t+6s", fontsize=15)
+    cb_time.set_label("t+0s → t+6s", fontsize=14)
     cb_time.set_ticks([])
 
-    # Probability colorbar
-    prob_cmap = LinearSegmentedColormap.from_list(
-        "prob_cmap",
-        [
-            (0.0, (1, 1, 1, 0.3)),      # low prob
-            (1.0, (1.0, 0.55, 0.0, 1))  # high prob
-        ]
-    )
-    prob_norm = mcolors.Normalize(vmin=0, vmax=1)
-    
-    cb_prob = plt.colorbar(
-        plt.cm.ScalarMappable(norm=prob_norm, cmap=prob_cmap),
-        cax=cax_prob
-    )
-    cb_prob.set_label("low → high", fontsize=15)
-    cb_prob.set_ticks([])
-    
     return plt
