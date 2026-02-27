@@ -239,8 +239,8 @@ MODEL:
 
     loss:
         # SGCP loss
-        goal_reg_weight: 15.0
-        disp_weight: 5.0
+        goal_reg_weight: 4.0
+        disp_weight: 2.0
         # decoder loss
         cls_weight: 2.0
         reg_weight: 1.0
