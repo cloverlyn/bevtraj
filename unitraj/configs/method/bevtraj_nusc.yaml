@@ -238,12 +238,15 @@ MODEL:
             y_bounds: [-51.2, 51.2]
 
     loss:
-        goal_reg_weight: 15.0
-        disp_weight: 5.0
-        entropy_weight: 10.0
-        kl_weight: 10.0
-        use_FDEADE_aux_loss: true
-        traj_type_weight: false
+        # decoder loss
+        cls_weight: 2.0
+        reg_weight: 1.0
+
+        # goal_prob branch (posterior + entropy + KL)
+        entropy_weight: 0.3
+        kl_weight: 1.0
+        goal_prob_sigma: 2.0
+        
         dataset_name: *dataset_name
     optimizer:
         lr: 0.0001

@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from unitraj.models.bevtraj.bev_deformable_aggregation import BDA_DEC
 from unitraj.models.bevtraj.decoder_deform_attn import BEVDeformCrossAttn
 from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead
-from unitraj.models.bevtraj.utility import gen_sineembed_for_position, ego_to_target, target_to_ego
+from unitraj.models.bevtraj.utility import gen_sineembed_for_position, target_to_ego
 
 
 class BEVTrajDecoderLayer(nn.Module):
@@ -148,107 +148,22 @@ class BEVTrajDecoder(nn.Module):
         self.motion_cls = MotionClsHead(self.D, self.T_D, self.T)
         self.motion_reg = MotionRegHead(self.D)
 
-    # def goal_candidate_proposal(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
-    #     bda_token, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
-
-    #     goal_logit = self.goal_score_head(bda_token).squeeze(-1)
-    #     goal_prob = F.softmax(goal_logit, dim=-1) # (B, N)
-
-
-
-    #     return mode_query, goal_candidate
-
-    def batched_kmeans_topk(
-            self,
-            top_pos: torch.Tensor,   # [B, M, 2]
-            top_token: torch.Tensor, # [B, M, D]
-            top_weight: torch.Tensor,# [B, M]
-            K: int,
-            iters: int = 10,
-            eps: float = 1e-6,
-        ):
-        """
-        Returns:
-            mode_query:     [K, B, D]
-            goal_candidate: [B, K, 2]
-        """
-
-        B, M, _ = top_pos.shape
-        D = top_token.shape[-1]
-
-        pts = top_pos.detach()  # clustering은 gradient 불필요
-
-        # ---------------- init centers ----------------
-        if M >= K:
-            centers = pts[:, :K, :].clone()  # [B, K, 2]
-        else:
-            pad = pts[:, :1, :].expand(B, K - M, 2)
-            centers = torch.cat([pts, pad], dim=1).contiguous()
-
-        # ---------------- kmeans loop ----------------
-        for _ in range(iters):
-            dist = (pts.unsqueeze(2) - centers.unsqueeze(1)).pow(2).sum(-1)  # [B, M, K]
-            labels = dist.argmin(dim=-1)                                      # [B, M]
-
-            new_centers = centers.clone()
-
-            for k in range(K):
-                mask = (labels == k)                          # [B, M]
-                cnt = mask.sum(dim=-1, keepdim=True)          # [B, 1]
-                has = (cnt.squeeze(-1) > 0)
-
-                if has.any():
-                    m = mask.unsqueeze(-1).float()            # [B, M, 1]
-                    sum_xy = (pts * m).sum(dim=1)             # [B, 2]
-                    mean_xy = sum_xy / (cnt.float() + eps)    # [B, 2]
-                    new_centers[has, k, :] = mean_xy[has]
-
-            centers = new_centers
-
-        goal_candidate = centers  # [B, K, 2]
-
-        # ---------------- mode query ----------------
-        dist = (pts.unsqueeze(2) - goal_candidate.unsqueeze(1)).pow(2).sum(-1)
-        labels = dist.argmin(dim=-1)  # [B, M]
-
-        mode_query_BKD = top_token.new_zeros(B, K, D)
-
-        for k in range(K):
-            mask = (labels == k).float()            # [B, M]
-            w = top_weight * mask                   # [B, M]
-            denom = w.sum(dim=-1, keepdim=True) + eps
-            w_norm = (w / denom).unsqueeze(-1)      # [B, M, 1]
-            mode_query_BKD[:, k, :] = (top_token * w_norm).sum(dim=1)
-
-        mode_query = mode_query_BKD.permute(1, 0, 2).contiguous()  # [K, B, D]
-
-        return mode_query, goal_candidate
-
     def goal_candidate_proposal(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
         bda_token, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
-        B, N, D = bda_token.shape
-        topM = min(64, N)
+        B, _, D = bda_token.shape
 
         goal_logit = self.goal_score_head(bda_token).squeeze(-1)
         goal_prob  = F.softmax(goal_logit, dim=-1)
 
         # top-k
-        top_prob, top_idx = torch.topk(goal_prob, k=topM, dim=-1)
+        _, top_idx = torch.topk(goal_prob, k=self.K, dim=-1)
 
-        idx_tok = top_idx.unsqueeze(-1).expand(B, topM, D)
-        idx_pos = top_idx.unsqueeze(-1).expand(B, topM, 2)
+        idx_tok = top_idx.unsqueeze(-1).expand(B, self.K, D)
+        idx_pos = top_idx.unsqueeze(-1).expand(B, self.K, 2)
 
-        top_token = torch.gather(bda_token, dim=1, index=idx_tok)
-        top_pos   = torch.gather(bda_pos,   dim=1, index=idx_pos)
-
-        mode_query, goal_candidate = self.batched_kmeans_topk(
-            top_pos=top_pos,
-            top_token=top_token,
-            top_weight=top_prob,
-            K=self.K,
-            iters=10,
-        )
+        mode_query = torch.gather(bda_token, dim=1, index=idx_tok)
+        goal_candidate = torch.gather(bda_pos,   dim=1, index=idx_pos)
 
         return mode_query, goal_candidate, goal_prob, bda_pos
 
@@ -290,23 +205,6 @@ class BEVTrajDecoder(nn.Module):
         scene_context = scene_context.permute(1, 0, 2)
 
         # -------------------- Goal Proposal ------------------------
-        # bda_token, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
-        # goal_logit = self.goal_score_head(bda_token).squeeze(-1) # (B, N)
-
-        # trans_x, trans_y, rot_sin, rot_cos = (
-        #     ego_dyn['ego_x'],
-        #     ego_dyn['ego_y'],
-        #     ego_dyn['ego_sin'],
-        #     ego_dyn['ego_cos'],
-        # )
-        # bda_pos = ego_to_target(bda_pos, trans_x, trans_y, rot_sin, rot_cos)
-
-        # goal_logit = self.goal_score_head(bda_token).squeeze(-1) # (B, N)
-
-        # qqq = self.Q.repeat(1, B, 1) # (K, B, D)
-
-        # goal_candidate = goal_reg.detach()
-
         mode_query, goal_candidate, goal_prob, bda_pos = self.goal_candidate_proposal(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
         # -------------------- Initial Prediction --------------------
