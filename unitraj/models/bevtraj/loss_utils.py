@@ -39,7 +39,7 @@ class Criterion(nn.Module):
         self,
         modes_preds,                 # list of [B, K]
         preds,                       # list of [K, T, B, 5]
-        goal_candidate,              # [B, K, 2] (SGCP top-k candidate)
+        goal_candidate,              # [K, B, 2] (SGCP top-k candidate)
         gt_decoder,                  # [B, T, 3] -> (x, y, valid)
         center_gt_final_valid_idx,   # [B]
     ):
