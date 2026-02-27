@@ -15,7 +15,6 @@ from unitraj.datasets import common_utils
 from unitraj.datasets.common_utils import get_polyline_dir, find_true_segments, generate_mask, is_ddp, \
     get_kalman_difficulty, get_trajectory_type, interpolate_polyline
 from unitraj.datasets.types import object_type, polyline_type
-from unitraj.utils.visualization import check_loaded_data
 
 default_value = 0
 object_type = defaultdict(lambda: default_value, object_type)
@@ -1219,6 +1218,8 @@ from omegaconf import OmegaConf
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def draw_figures(cfg):
+    from unitraj.utils.visualization import check_loaded_data, concatenate_varying
+
     set_seed(cfg.seed)
     OmegaConf.set_struct(cfg, False)  # Open the struct
     cfg = OmegaConf.merge(cfg, cfg.method)
@@ -1281,7 +1282,6 @@ if __name__ == '__main__':
     from unitraj.utils.utils import set_seed
     import io
     from PIL import Image
-    from unitraj.utils.visualization import concatenate_varying
 
     split_data()
     # draw_figures()

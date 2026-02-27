@@ -1,3 +1,6 @@
+import matplotlib
+
+matplotlib.use("Agg", force=True)
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -182,12 +185,6 @@ def draw_vehicle_box(ax, center_x, center_y, sin_theta, cos_theta,
 def visualize_prediction(batch, prediction, draw_index=0,
                          window_size=40, x_offset=20,
                          vis_dense_future=False):
-
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import matplotlib.colors as mcolors
-    from matplotlib.colors import LinearSegmentedColormap
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     def draw_line_with_mask(point1, point2, color, line_width=3):
         ax.plot(
