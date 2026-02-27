@@ -162,8 +162,8 @@ class BEVTrajDecoder(nn.Module):
         idx_tok = top_idx.unsqueeze(-1).expand(B, self.K, D)
         idx_pos = top_idx.unsqueeze(-1).expand(B, self.K, 2)
 
-        mode_query = torch.gather(bda_token, dim=1, index=idx_tok)
-        goal_candidate = torch.gather(bda_pos,   dim=1, index=idx_pos)
+        mode_query = torch.gather(bda_token, dim=1, index=idx_tok).permute(1, 0, 2).contiguous()
+        goal_candidate = torch.gather(bda_pos, dim=1, index=idx_pos)
 
         return mode_query, goal_candidate, goal_prob, bda_pos
 
