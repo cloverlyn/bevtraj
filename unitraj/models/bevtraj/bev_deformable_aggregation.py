@@ -11,10 +11,6 @@ from unitraj.models.bevtraj.linear import build_mlp, MLP, FFN
 from unitraj.models.bevtraj.utility import gen_sineembed_for_position, target_to_ego
 
 
-def _get_clones(module, N):
-    return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
-
-
 class QueryConditionedDynamics(nn.Module):
     """
     dynamics: [batch_size, query_num, dyn_dim]
@@ -166,15 +162,6 @@ class BEVDeformableAggregation(nn.Module, ABC):
         self.refine_share_param = config['refine_share_param']
         
         self.ba_query = nn.Parameter(torch.zeros(self.num_ba_query, self.D), requires_grad=True)
-
-        # refine_layer = MLP(self.D, self.D, 2, 3)
-        # nn.init.zeros_(refine_layer.layers[-1].weight)
-        # nn.init.zeros_(refine_layer.layers[-1].bias)
-        
-        # if self.refine_share_param:
-        #     self.ref_pos_refine = refine_layer
-        # else:
-        #     self.ref_pos_refine = _get_clones(refine_layer, self.config['num_bda_layers'])
             
         self.register_buffer('denorm_scale', torch.tensor(self.grid_size, dtype=torch.float32))
     
@@ -276,15 +263,7 @@ class BDA_ENC(BEVDeformableAggregation):
 
         for lid, layer in enumerate(self.bda_layers):
             query_pos = self.pos_scale(output) * pos_q
-
             output = layer(output, query_pos, ref_pos_norm, bev_feat)
-            
-            # if self.refine_share_param:
-            #     tmp = self.ref_pos_refine(output)
-            # else:
-            #     tmp = self.ref_pos_refine[lid](output)
-                
-            # ref_pos = tmp + ref_pos  # todo: use tanh
             
         return output, ref_pos
 
@@ -341,9 +320,10 @@ class BDA_DEC(BEVDeformableAggregation):
         ec_pos = self.dynamics_enc['ec_to_pos'](ec_d).tanh() * self.denorm_scale[None, None, :]
         ec_pos= gen_sineembed_for_position(ec_pos, hidden_dim=self.D, temperature=10000)
         
+        tc_pos = gen_sineembed_for_position(ref_pos_target, hidden_dim=self.D, temperature=10000)
         tc_d = self.dynamics_enc['tc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
         tc_d = self.dynamics_enc['tc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-        tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
+        tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), tc_pos) # (B, num_ba_query, D)
                     
         output = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)) # (B, num_ba_query, D)
 
@@ -352,14 +332,6 @@ class BDA_DEC(BEVDeformableAggregation):
         # ==========================================================================
 
         for lid, layer in enumerate(self.bda_layers):
-            
             output = layer(output, query_sine_embed, ref_pos_norm, bev_feat, lid)
-            
-            # if self.refine_share_param:
-            #     tmp = self.ref_pos_refine(output)
-            # else:
-            #     tmp = self.ref_pos_refine[lid](output)
-                
-            # ref_pos = tmp + ref_pos  # todo: use tanh
             
         return output, ref_pos_target

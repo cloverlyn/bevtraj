@@ -1,9 +1,5 @@
-from scipy import special
-import numpy as np
-
 import torch
 import torch.nn as nn
-from torch.distributions import MultivariateNormal, Laplace
 import torch.nn.functional as F
 
 
@@ -12,12 +8,13 @@ class Criterion(nn.Module):
         super(Criterion, self).__init__()
         self.config = config
 
+        self.goal_FDE_loss = nn.SmoothL1Loss(reduction='mean', beta=1.0)
+
     def forward(self, out, gt, center_gt_final_valid_idx, traj_data):
         modes_preds = out['predicted_probability'] # [B, K]
         preds = out['predicted_trajectory'] # [K, T, B, 5]
-        goal_prob = out['goal_prob']
-        anchor_pos = out['anchor_pos']
-        goal_candidate = out['goal_candidate']       # [B, K, 2]
+        goal_reg = out['predicted_goal_reg'] # [K, B, 2]
+        goal_FDE = out['predicted_goal_FDE'] # [B, K]
         dense_future_pred = out['dense_future_pred']
 
         gt_decoder = gt[0]
@@ -27,20 +24,15 @@ class Criterion(nn.Module):
         decoder_loss = self.get_decoder_loss_hard_assign(
             modes_preds=modes_preds,
             preds=preds,
-            goal_candidate=goal_candidate,
+            goal_candidate=goal_reg,
             gt_decoder=gt_decoder,
             center_gt_final_valid_idx=center_gt_final_valid_idx,
         )
 
-        goal_prob_loss = self.get_goal_prob_loss(
-            goal_prob=goal_prob,
-            goal_anchor=anchor_pos,
-            gt=gt_decoder,
-            center_gt_final_valid_idx=center_gt_final_valid_idx,
-        )
+        goal_prediction_loss = self.get_goal_prediction_loss(goal_reg, goal_FDE, gt_decoder, traj_data)
         dense_future_loss = self.get_dense_future_prediction_loss(dense_future_pred, gt_dense_future_trajs)
 
-        total_loss = decoder_loss + goal_prob_loss + dense_future_loss
+        total_loss = decoder_loss + goal_prediction_loss + dense_future_loss # todo: weighted loss approach
         return total_loss
 
     def get_decoder_loss_hard_assign(
@@ -63,7 +55,7 @@ class Criterion(nn.Module):
 
         # 1) hard assignment from SGCP goal candidate (detach)
         with torch.no_grad():
-            dist = (goal_candidate.detach() - gt_goal[:, None, :]).norm(dim=-1)  # [B, K]
+            dist = (goal_candidate.permute(1, 0, 2).detach() - gt_goal[:, None, :]).norm(dim=-1)  # [B, K]
             hard_idx = dist.argmin(dim=-1)                                        # [B]
 
         w_cls = self.config.get('cls_weight', 1.0)
@@ -98,50 +90,19 @@ class Criterion(nn.Module):
 
         return total / len(preds)
     
-    def get_goal_prob_loss(
-        self,
-        goal_prob,                  # [B, N] (prior over goal anchors)
-        goal_anchor,                # [B, N, 2] (anchor positions in target coord)
-        gt,                         # [B, T, 3] (x, y, valid)
-        center_gt_final_valid_idx,  # [B]
-    ):
-        eps = 1e-9
-        entropy_weight = self.config.get('entropy_weight', 0.3)
-        kl_weight = self.config.get('kl_weight', 1.0)
-        sigma = self.config.get('goal_prob_sigma', 2.0)
+    def get_goal_prediction_loss(self, goal_reg, goal_FDE, gt, traj_data):
+        mask = gt[..., -1]
+        
+        reg_loss = (torch.norm((goal_reg[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1)), 2, dim=-1) * mask[:, -1:])
+        
+        goal_reg_detached = goal_reg.detach()
+        FDE_gt = (torch.norm(goal_reg_detached[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1), 2, dim=-1) * mask[:, -1:])
+        disp_loss = self.goal_FDE_loss(goal_FDE, FDE_gt)
+        
+        reg_loss = reg_loss.min(dim=1)[0].mean()
 
-        B, N = goal_prob.shape
-        device = goal_prob.device
-        b_idx = torch.arange(B, device=device)
-
-        # per-sample final valid GT goal
-        gt_goal = gt[b_idx, center_gt_final_valid_idx.long(), :2]                  # [B, 2]
-        valid_final = gt[b_idx, center_gt_final_valid_idx.long(), -1].float()      # [B]
-
-        # likelihood p(goal_gt | anchor_n): isotropic Gaussian (in log-space, const dropped)
-        sq_dist = ((goal_anchor - gt_goal.unsqueeze(1)) ** 2).sum(dim=-1)          # [B, N]
-        log_lik = -0.5 * sq_dist / (sigma ** 2)                                     # [B, N]
-
-        # posterior q(n) ∝ p(goal_gt | n) * p(n)
-        prior = goal_prob.clamp_min(eps)
-        log_post_unnorm = log_lik + torch.log(prior)
-        log_post = log_post_unnorm - torch.logsumexp(log_post_unnorm, dim=-1, keepdim=True)
-        post_pr = torch.exp(log_post)                                               # [B, N]
-
-        # expected negative log-likelihood under posterior
-        nll = ((-log_lik) * post_pr).sum(dim=-1)                                    # [B]
-        nll = (nll * valid_final).sum() / valid_final.sum().clamp_min(1.0)
-
-        # posterior entropy (encourage confident assignment)
-        post_entropy = -(post_pr * torch.log(post_pr.clamp_min(eps))).sum(dim=-1)   # [B]
-        post_entropy = (post_entropy * valid_final).sum() / valid_final.sum().clamp_min(1.0)
-
-        # KL(post || prior), same style as nll_loss_multimodes
-        kl_loss_fn = torch.nn.KLDivLoss(reduction='batchmean')
-        kl_loss = kl_loss_fn(torch.log(prior), post_pr)
-
-        return nll + entropy_weight * post_entropy + kl_weight * kl_loss
-
+        total_loss = self.config['goal_reg_weight'] * reg_loss + self.config['disp_weight'] * disp_loss
+        return total_loss
 
     def get_dense_future_prediction_loss(self, prediction, gt):
         obj_trajs_future_state = gt['obj_trajs_future_state']

@@ -238,21 +238,19 @@ MODEL:
             y_bounds: [-51.2, 51.2]
 
     loss:
+        # SGCP loss
+        goal_reg_weight: 15.0
+        disp_weight: 5.0
         # decoder loss
         cls_weight: 2.0
         reg_weight: 1.0
-
-        # goal_prob branch (posterior + entropy + KL)
-        entropy_weight: 0.3
-        kl_weight: 1.0
-        goal_prob_sigma: 2.0
         
         dataset_name: *dataset_name
     optimizer:
-        lr: 0.0001
+        lr: 0.0002
         weight_decay: 0.01
     scheduler:
-        lr: 0.0001
+        lr: 0.0002
         min_lr: 5e-6
         warmup_epochs: 5
         epochs: *max_epochs
