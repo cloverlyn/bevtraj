@@ -72,7 +72,10 @@ class BEVTraj(BaseModel):
         
         last_prob = output['predicted_probability'][-1]
         last_traj = output['predicted_trajectory'][-1].permute(2, 0, 1, 3)
-        goal_candidate = output['predicted_goal_reg']
+
+        goal_candidate = output['goal_candidate'].permute(1, 0, 2)
+        # goal_candidate = output['predicted_goal_reg']
+        
         prediction = {'predicted_probability': last_prob,
                       'predicted_trajectory': last_traj,
                       'dense_future_pred': dense_future_pred,

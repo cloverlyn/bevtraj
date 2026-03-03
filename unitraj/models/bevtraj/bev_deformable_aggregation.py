@@ -292,15 +292,21 @@ class BDA_DEC(BEVDeformableAggregation):
             for _ in range(self.config['num_bda_layers'])
         ])
 
-        file_path = 'unitraj/models/bevtraj/cluster_256_center_dict_6s.pkl'
+        # file_path = 'unitraj/models/bevtraj/cluster_256_center_dict_6s.pkl'
+        file_path = 'unitraj/models/bevtraj/cluster_64_center_dict_6s.pkl'
         with open(file_path, 'rb') as f:
             anchors = pickle.load(f)
         self.register_buffer('anchors', torch.from_numpy(anchors['VEHICLE']).float())
         # self.anchors = nn.Parameter(torch.from_numpy(anchors['VEHICLE']).float())
 
+        self.ba_query_dec = nn.Parameter(torch.zeros(64, self.D), requires_grad=True) # kong_fixme
+        self.num_ba_query = 64
+
     def forward(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
         B = bev_feat.shape[0]
-        output = self.ba_query[None].repeat(B, 1, 1)
+        # output = self.ba_query[None].repeat(B, 1, 1)
+        output = self.ba_query_dec[None].repeat(B, 1, 1) # kong_fixme
+
         ref_pos_target = self.anchors[None].repeat(B, 1, 1)
 
         trans_x, trans_y, rot_sin, rot_cos = (
