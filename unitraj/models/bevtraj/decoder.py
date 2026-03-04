@@ -117,7 +117,8 @@ class BEVTrajDecoder(nn.Module):
         
         # ============================ Goal Candidate Proposal==========================
         self.bda_sgcp = BDA_DEC(self.config['bda_dec'], self.D)
-        self.goal_score_head = MLP(self.D, self.D, 1, 2)
+        # self.goal_score_head = MLP(self.D, self.D, 1, 2)
+        self.goal_FDE = MLP(self.D, self.D, 1, 2)
 
         self.grid_size = config['grid_size']
         self.register_buffer('denorm_scale', torch.tensor(self.grid_size, dtype=torch.float32))
@@ -153,11 +154,12 @@ class BEVTrajDecoder(nn.Module):
 
         B, _, D = bda_token.shape
 
-        goal_logit = self.goal_score_head(bda_token).squeeze(-1)
-        goal_prob  = F.softmax(goal_logit, dim=-1)
+        # goal_logit = self.goal_score_head(bda_token).squeeze(-1)
+        # goal_prob  = F.softmax(goal_logit, dim=-1)
+        goal_FDE = self.goal_FDE(bda_token).squeeze(-1) # (B, N)
 
         # top-k
-        _, top_idx = torch.topk(goal_prob, k=self.K, dim=-1)
+        _, top_idx = torch.topk(goal_FDE, k=self.K, dim=-1, largest=False)
 
         idx_tok = top_idx.unsqueeze(-1).expand(B, self.K, D)
         idx_pos = top_idx.unsqueeze(-1).expand(B, self.K, 2)
@@ -165,7 +167,7 @@ class BEVTrajDecoder(nn.Module):
         mode_query = torch.gather(bda_token, dim=1, index=idx_tok).permute(1, 0, 2).contiguous()
         goal_candidate = torch.gather(bda_pos, dim=1, index=idx_pos)
 
-        return mode_query, goal_candidate, goal_prob, bda_pos
+        return mode_query, goal_candidate, goal_FDE, bda_pos
 
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
         K, B, _ = mode_query.shape
@@ -204,11 +206,10 @@ class BEVTrajDecoder(nn.Module):
         scene_context_repeat = scene_context_repeat.permute(1, 0, 2, 3).reshape(n, B * self.T, -1)
         scene_context = scene_context.permute(1, 0, 2)
 
-        # -------------------- Goal Proposal BDA --------------------
-        mode_query, goal_candidate, goal_prob, bda_pos = self.goal_candidate_proposal(bev_feat, ec_dyn, tc_dyn, ego_dyn)
+        # -------------------Goal Candidate Proposal -----------------
+        mode_query, goal_candidate, goal_FDE, bda_pos = self.goal_candidate_proposal(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
         # -------------------- Initial Prediction --------------------
-
         dec_embed, init_mode_prob, init_pred_traj = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
         
         ref_points = init_pred_traj[..., :2].detach().clone()
@@ -243,7 +244,8 @@ class BEVTrajDecoder(nn.Module):
             
         output = {'predicted_probability': mode_probs,
                   'predicted_trajectory': pred_trajs,
-                  'goal_prob' : goal_prob,
+                #   'goal_prob' : goal_prob,
+                  'goal_FDE' : goal_FDE,
                   'anchor_pos' : bda_pos,
                   'goal_candidate': goal_candidate,
                 }
