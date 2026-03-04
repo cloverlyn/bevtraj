@@ -73,11 +73,18 @@ class Criterion(nn.Module):
             dist = (goal_candidate.detach() - gt_goal[:, None, :]).norm(dim=-1)  # [B, K]
             hard_idx = dist.argmin(dim=-1)                                        # [B]
 
-        w_cls = self.config.get('cls_weight', 1.0)
+        w_cls = self.config.get('cls_weight', 2.0)
         w_reg = self.config.get('reg_weight', 1.0)
+        w_cls_final = self.config.get('cls_weight_final', 4.0)
+        w_reg_final = self.config.get('reg_weight_final', 2.0)
 
         total = 0.0
-        for pred_scores, pred in zip(modes_preds, preds):
+        num_layers = len(preds)
+        for layer_idx, (pred_scores, pred) in enumerate(zip(modes_preds, preds)):
+            is_last_layer = (layer_idx == num_layers - 1)
+            cur_w_cls = w_cls_final if is_last_layer else w_cls
+            cur_w_reg = w_reg_final if is_last_layer else w_reg
+
             # pred: [K, T, B, 5] -> [B, K, T, 5]
             pred_trajs = pred.permute(2, 0, 1, 3).contiguous()
 
@@ -99,7 +106,7 @@ class Criterion(nn.Module):
 
             loss_cls = F.cross_entropy(pred_scores, hard_idx, reduction='none')  # [B]
 
-            layer_loss = (w_reg * loss_reg_gmm + w_cls * loss_cls)               # [B]
+            layer_loss = (cur_w_reg * loss_reg_gmm + cur_w_cls * loss_cls)      # [B]
             layer_loss = (layer_loss * valid_final).sum() / valid_final.sum().clamp_min(1.0)
             total = total + layer_loss
 

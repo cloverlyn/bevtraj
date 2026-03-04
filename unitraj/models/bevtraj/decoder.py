@@ -148,6 +148,7 @@ class BEVTrajDecoder(nn.Module):
         
         self.motion_cls = MotionClsHead(self.D, self.T_D, self.T)
         self.motion_reg = MotionRegHead(self.D)
+        self.motion_reg_final = MotionRegHead(self.D)
 
     def goal_candidate_proposal(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
         bda_token, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
@@ -218,7 +219,9 @@ class BEVTrajDecoder(nn.Module):
         
         dec_embed = dec_embed.permute(2, 1, 0, 3).reshape(self.T, B * self.K, -1)
 
-        for layer in self.dec_layers:
+        num_refine_layers = len(self.dec_layers)
+        for lid, layer in enumerate(self.dec_layers):
+            is_last_layer = (lid == num_refine_layers - 1)
             query_scale = self.get_query_scale_T(dec_embed)
             dec_embed = layer(
                 dec_embed=dec_embed,
@@ -230,10 +233,15 @@ class BEVTrajDecoder(nn.Module):
             
             mode_prob = F.softmax(self.motion_cls(dec_embed), dim=0).squeeze(dim=-1).T
 
-            pred_traj_raw = self.motion_reg(dec_embed)          # [K, B, T, 5]
-            pred_xy = pred_traj_raw[..., :2] + ref_points       # out-of-place
-            pred_traj = torch.cat([pred_xy, pred_traj_raw[..., 2:]], dim=-1)
-            ref_points = pred_xy.detach().clone() 
+            if is_last_layer:
+                # final layer: direct prediction (no refinement)
+                pred_traj = self.motion_reg_final(dec_embed)
+            else:
+                # intermediate layers: iterative refinement
+                pred_traj_raw = self.motion_reg(dec_embed)          # [K, B, T, 5]
+                pred_xy = pred_traj_raw[..., :2] + ref_points       # out-of-place
+                pred_traj = torch.cat([pred_xy, pred_traj_raw[..., 2:]], dim=-1)
+                ref_points = pred_xy.detach().clone() 
 
             pred_traj = pred_traj.permute(0, 2, 1, 3)
                 
