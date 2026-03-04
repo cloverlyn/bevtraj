@@ -66,7 +66,8 @@ class BEVDeformCrossAttn(nn.Module):
         dropout = 0.,
         offset_scale = 4,
         x_bounds = [-51.2, 51.2],
-        y_bounds = [-51.2, 51.2]
+        y_bounds = [-51.2, 51.2],
+        grid_size = [51.2, 51.2],
     ):
         super().__init__()
 
@@ -77,7 +78,7 @@ class BEVDeformCrossAttn(nn.Module):
 
         offset_dims = inner_dim // self.offset_groups
 
-        self.offset_scale = offset_scale
+        # self.offset_scale = offset_scale
         
         assert torch.isclose(torch.abs(torch.tensor(x_bounds[0])), 
                      torch.abs(torch.tensor(x_bounds[1]))), "x range must be symmetric"
@@ -98,10 +99,13 @@ class BEVDeformCrossAttn(nn.Module):
         self.to_offsets = nn.Sequential(
             nn.Linear(offset_dims//2, offset_dims),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(offset_dims, 2),
-            nn.Tanh(),
-            Scale(offset_scale)
+            # nn.Tanh(),
+            # Scale(offset_scale)
         )
+        self.register_buffer('denorm_scale', torch.tensor(grid_size, dtype=torch.float32))
+        self.register_buffer('offset_normalizer', torch.tensor(grid_size, dtype=torch.float32))
 
         self.to_out = nn.Linear(inner_dim//2, dim)
     
@@ -146,10 +150,18 @@ class BEVDeformCrossAttn(nn.Module):
 
         # calculate grid + offsets
 
-        vgrid = ref_points.unsqueeze(-2) + offsets
+        # vgrid = ref_points.unsqueeze(-2) + offsets
+        # if has_T:
+        #     vgrid = vgrid.reshape(B, K*T, offset_groups, -1)
+        # vgrid_scaled = normalize_grid(vgrid, w=self.p_w, h=self.p_h, dim=-1, out_dim=-1, ref_from_Q=True)
+        # vgrid_scaled_fliped = vgrid_scaled.clone()
+        # vgrid_scaled_fliped[..., -1] = vgrid_scaled_fliped[..., -1] * -1 # Align with F.grid_sample coordinate system
+
+        ref_pos_norm = ref_points / self.denorm_scale[None, None, :] # normalizing
+        vgrid_scaled = ref_pos_norm.unsqueeze(-2) + offsets / self.offset_normalizer[None, None, None, :]
         if has_T:
-            vgrid = vgrid.reshape(B, K*T, offset_groups, -1)
-        vgrid_scaled = normalize_grid(vgrid, w=self.p_w, h=self.p_h, dim=-1, out_dim=-1, ref_from_Q=True)
+            vgrid_scaled = vgrid_scaled.reshape(B, K*T, offset_groups, -1)
+        vgrid = vgrid_scaled * self.denorm_scale[None, None, None, :] # denormalizing
         vgrid_scaled_fliped = vgrid_scaled.clone()
         vgrid_scaled_fliped[..., -1] = vgrid_scaled_fliped[..., -1] * -1 # Align with F.grid_sample coordinate system
         
