@@ -12,6 +12,67 @@ from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead
 from unitraj.models.bevtraj.utility import gen_sineembed_for_position, target_to_ego
 
 
+class TemporalMHA(nn.Module):
+    """
+    Multi-head self attention without projection.
+
+    q,k = concat(dec_embed, time_pe)
+    v   = dec_embed
+
+    Inputs
+        dec_embed : [T, BK, D]
+        time_pe   : [T, BK, D]
+
+    Output
+        out       : [T, BK, D]
+    """
+
+    def __init__(self, d_model, num_heads, dropout=0.0):
+        super().__init__()
+
+        assert d_model % num_heads == 0
+
+        self.D = d_model
+        self.H = num_heads
+        self.dh = d_model // num_heads
+        self.scale = math.sqrt(2 * self.dh)
+
+        self.dropout = dropout
+
+    def forward(self, dec_embed, time_pe):
+
+        T, BK, D = dec_embed.shape
+
+        # [BK, H, T, dh]
+        dec_h = (
+            dec_embed.permute(1, 0, 2)
+            .reshape(BK, T, self.H, self.dh)
+            .permute(0, 2, 1, 3)
+        )
+        time_h = (
+            time_pe.permute(1, 0, 2)
+            .reshape(BK, T, self.H, self.dh)
+            .permute(0, 2, 1, 3)
+        )
+        q = torch.cat([dec_h, time_h], dim=-1)  # [BK,H,T,2dh]
+        k = torch.cat([dec_h, time_h], dim=-1)
+        v = dec_h  # [BK,H,T,dh]
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
+
+        attn = torch.softmax(scores, dim=-1)
+        attn = F.dropout(attn, p=self.dropout, training=self.training)
+
+        out = torch.matmul(attn, v)  # [BK,H,T,dh]
+        out = (
+            out.permute(0, 2, 1, 3)
+            .contiguous()
+            .reshape(BK, T, D)
+            .permute(1, 0, 2)
+        )
+        return out
+
+
 class BEVTrajDecoderLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -29,13 +90,17 @@ class BEVTrajDecoderLayer(nn.Module):
         
         self.to_pos_Q = MLP(self.Q_D, self.Q_D, self.Q_D, 2)
         self.norm = nn.ModuleList([nn.LayerNorm(self.D) for _ in range(3)])
-        self.temp_self_attn = nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout)
+        # self.temp_self_attn = nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout)
+
+        # exp: temporal PE (time_embedding_mlp)
+        self.temp_self_attn = TemporalMHA(self.D, self.num_heads, self.dropout)
+
         self.transformer_decoder_layer = nn.TransformerDecoderLayer(self.D, self.num_heads,
                                                                     dim_feedforward=self.ffn_D, dropout=self.dropout)
         self.bev_cross_attn = BEVDeformCrossAttn(**config['deform_cross_attn'])
         self.ffn = FFN(self.D, self.ffn_D, 2)
     
-    def forward(self, dec_embed, scene_context, bev_feat, query_scale, ref_points, ego_dyn):
+    def forward(self, dec_embed, scene_context, bev_feat, query_scale, ref_points, ego_dyn, time_pe):
         '''
         Args:
             dec_embed: [T, B*K, D]
@@ -49,7 +114,11 @@ class BEVTrajDecoderLayer(nn.Module):
         
         # ============================== target-centric(tc) modeling ==============================
         
-        dec_embed = self.norm[0](self.temp_self_attn(query=dec_embed, key=dec_embed, value=dec_embed)[0] + dec_embed)
+        # dec_embed = self.norm[0](self.temp_self_attn(query=dec_embed, key=dec_embed, value=dec_embed)[0] + dec_embed)
+
+        # exp: temporal PE (time_embedding_mlp)
+        temp_out = self.temp_self_attn(dec_embed, time_pe)
+        dec_embed = self.norm[0](temp_out + dec_embed)
         
         # get positional query
         query_sine_embed = gen_sineembed_for_position(ref_points, hidden_dim=self.Q_D, temperature=self.spa_pos_T)
@@ -139,6 +208,16 @@ class BEVTrajDecoder(nn.Module):
         self.motion_reg_l1 = MotionRegHead(self.D)
 
         # ============================ Iterative Refinement ============================
+
+        # exp: temporal PE (time_embedding_mlp)
+        self.time_embedding_mlp = nn.Sequential(
+            nn.Linear(1, 64),
+            nn.GELU(),
+            nn.Linear(64, self.D)
+        )
+        self.register_buffer("future_time", torch.arange(self.T).float().unsqueeze(-1))
+        self.dt = config.get("dt", 0.1)
+        self.time_emb_alpha = nn.Parameter(torch.tensor(1.0))
         
         # self.mode_sep_enc = ModeSeperationEncoding(self.D, self.dropout, mode_num=self.K, temperature=self.mode_pos_T)
         self.get_query_scale_T = MLP(self.query_scale_dims, self.query_scale_dims, self.query_scale_dims, 2)
@@ -149,6 +228,15 @@ class BEVTrajDecoder(nn.Module):
         self.motion_cls = MotionClsHead(self.D, self.T_D, self.T)
         self.motion_reg = MotionRegHead(self.D)
         self.motion_reg_final = MotionRegHead(self.D)
+
+    def build_time_pe(self, B, K, dtype):
+        t = self.future_time * self.dt + 0.1
+        t = t.to(dtype) # [T,1]
+        pe = self.time_embedding_mlp(t)  # [T,D]
+        pe = pe[:, None, None, :].repeat(1, B, K, 1)  # [T,B,K,D]
+        pe = pe.reshape(self.T, B * K, self.D)  # [T,BK,D]
+
+        return self.time_emb_alpha * pe
 
     def goal_candidate_proposal(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
         bda_token, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
@@ -219,6 +307,9 @@ class BEVTrajDecoder(nn.Module):
         
         dec_embed = dec_embed.permute(2, 1, 0, 3).reshape(self.T, B * self.K, -1)
 
+        # exp: temporal PE (time_embedding_mlp)
+        time_pe = self.build_time_pe(B, self.K, dec_embed.dtype)
+
         num_refine_layers = len(self.dec_layers)
         for lid, layer in enumerate(self.dec_layers):
             is_last_layer = (lid == num_refine_layers - 1)
@@ -229,7 +320,9 @@ class BEVTrajDecoder(nn.Module):
                 bev_feat=bev_feat,
                 query_scale=query_scale,
                 ref_points=ref_points,
-                ego_dyn=ego_dyn)
+                ego_dyn=ego_dyn,
+                time_pe=time_pe,
+                )
             
             mode_prob = F.softmax(self.motion_cls(dec_embed), dim=0).squeeze(dim=-1).T
 
