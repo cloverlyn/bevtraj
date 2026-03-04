@@ -57,6 +57,4 @@ class WarmupCosLR(_LRScheduler):
         if "lr_scale" in self.optimizer.param_groups[0]:
             return [lr * group["lr_scale"] for group in self.optimizer.param_groups]
         
-        print(f"WarmupCosLR - current_epoch: {self.last_epoch}, current_lr: {lr}")
-
         return [lr for _ in self.optimizer.param_groups]
