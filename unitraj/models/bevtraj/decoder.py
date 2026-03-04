@@ -186,8 +186,8 @@ class BEVTrajDecoder(nn.Module):
         
         # ============================ Goal Candidate Proposal==========================
         self.bda_sgcp = BDA_DEC(self.config['bda_dec'], self.D)
-        # self.goal_score_head = MLP(self.D, self.D, 1, 2)
-        self.goal_FDE = MLP(self.D, self.D, 1, 2)
+        self.goal_score_head = MLP(self.D, self.D, 1, 2)
+        # self.goal_FDE = MLP(self.D, self.D, 1, 2)
 
         self.grid_size = config['grid_size']
         self.register_buffer('denorm_scale', torch.tensor(self.grid_size, dtype=torch.float32))
@@ -243,12 +243,11 @@ class BEVTrajDecoder(nn.Module):
 
         B, _, D = bda_token.shape
 
-        # goal_logit = self.goal_score_head(bda_token).squeeze(-1)
-        # goal_prob  = F.softmax(goal_logit, dim=-1)
-        goal_FDE = self.goal_FDE(bda_token).squeeze(-1) # (B, N)
+        goal_logit = self.goal_score_head(bda_token).squeeze(-1)
+        goal_prob  = F.softmax(goal_logit, dim=-1)
 
         # top-k
-        _, top_idx = torch.topk(goal_FDE, k=self.K, dim=-1, largest=False)
+        _, top_idx = torch.topk(goal_prob, k=self.K, dim=-1)
 
         idx_tok = top_idx.unsqueeze(-1).expand(B, self.K, D)
         idx_pos = top_idx.unsqueeze(-1).expand(B, self.K, 2)
@@ -256,7 +255,7 @@ class BEVTrajDecoder(nn.Module):
         mode_query = torch.gather(bda_token, dim=1, index=idx_tok).permute(1, 0, 2).contiguous()
         goal_candidate = torch.gather(bda_pos, dim=1, index=idx_pos)
 
-        return mode_query, goal_candidate, goal_FDE, bda_pos
+        return mode_query, goal_candidate, goal_prob, bda_pos
 
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
         K, B, _ = mode_query.shape
@@ -296,7 +295,7 @@ class BEVTrajDecoder(nn.Module):
         scene_context = scene_context.permute(1, 0, 2)
 
         # -------------------Goal Candidate Proposal -----------------
-        mode_query, goal_candidate, goal_FDE, bda_pos = self.goal_candidate_proposal(bev_feat, ec_dyn, tc_dyn, ego_dyn)
+        mode_query, goal_candidate, goal_prob, bda_pos = self.goal_candidate_proposal(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
         # -------------------- Initial Prediction --------------------
         dec_embed, init_mode_prob, init_pred_traj = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
@@ -312,7 +311,7 @@ class BEVTrajDecoder(nn.Module):
 
         num_refine_layers = len(self.dec_layers)
         for lid, layer in enumerate(self.dec_layers):
-            is_last_layer = (lid == num_refine_layers - 1)
+            # is_last_layer = (lid == num_refine_layers - 1)
             query_scale = self.get_query_scale_T(dec_embed)
             dec_embed = layer(
                 dec_embed=dec_embed,
@@ -326,15 +325,15 @@ class BEVTrajDecoder(nn.Module):
             
             mode_prob = F.softmax(self.motion_cls(dec_embed), dim=0).squeeze(dim=-1).T
 
-            if is_last_layer:
-                # final layer: direct prediction (no refinement)
-                pred_traj = self.motion_reg_final(dec_embed)
-            else:
+            # if is_last_layer:
+            #     # final layer: direct prediction (no refinement)
+            #     pred_traj = self.motion_reg_final(dec_embed)
+            # else:
                 # intermediate layers: iterative refinement
-                pred_traj_raw = self.motion_reg(dec_embed)          # [K, B, T, 5]
-                pred_xy = pred_traj_raw[..., :2] + ref_points       # out-of-place
-                pred_traj = torch.cat([pred_xy, pred_traj_raw[..., 2:]], dim=-1)
-                ref_points = pred_xy.detach().clone() 
+            pred_traj_raw = self.motion_reg(dec_embed)          # [K, B, T, 5]
+            pred_xy = pred_traj_raw[..., :2] + ref_points       # out-of-place
+            pred_traj = torch.cat([pred_xy, pred_traj_raw[..., 2:]], dim=-1)
+            ref_points = pred_xy.detach().clone() 
 
             pred_traj = pred_traj.permute(0, 2, 1, 3)
                 
@@ -345,8 +344,8 @@ class BEVTrajDecoder(nn.Module):
             
         output = {'predicted_probability': mode_probs,
                   'predicted_trajectory': pred_trajs,
-                #   'goal_prob' : goal_prob,
-                  'goal_FDE' : goal_FDE,
+                  'goal_prob' : goal_prob,
+                #   'goal_FDE' : goal_FDE,
                   'anchor_pos' : bda_pos,
                   'goal_candidate': goal_candidate,
                 }
