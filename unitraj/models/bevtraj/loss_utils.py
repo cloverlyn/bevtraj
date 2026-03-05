@@ -13,16 +13,20 @@ class Criterion(nn.Module):
     def forward(self, out, gt, center_gt_final_valid_idx, traj_data):
         modes_preds = out['predicted_probability'] # [B, K]
         preds = out['predicted_trajectory'] # [K, T, B, 5]
+
         goal_prob = out['goal_prob']
-        # goal_FDE = out['goal_FDE']
         anchor_pos = out['anchor_pos']
-        goal_candidate = out['goal_candidate']       # [B, K, 2]
+
+        goal_reg_list = out['goal_reg_list']
+        goal_FDE_list = out['goal_FDE_list']
+
         dense_future_pred = out['dense_future_pred']
 
         gt_decoder = gt[0]
         gt_dense_future_trajs = gt[1]
         
         # iterative decoder loss: SGCP hard assignment
+        goal_candidate = out['goal_reg_list'][-1].permute(1, 0, 2)
         decoder_loss = self.get_decoder_loss_hard_assign(
             modes_preds=modes_preds,
             preds=preds,
@@ -43,10 +47,16 @@ class Criterion(nn.Module):
         #     gt_decoder=gt_decoder,
         #     center_gt_final_valid_idx=center_gt_final_valid_idx,
         # )
-
+        goal_reg_loss = self.get_goal_prediction_loss(
+            goal_reg_list=goal_reg_list,
+            goal_FDE_list=goal_FDE_list,
+            gt=gt_decoder,
+            center_gt_final_valid_idx=center_gt_final_valid_idx,
+        )
         dense_future_loss = self.get_dense_future_prediction_loss(dense_future_pred, gt_dense_future_trajs)
 
-        total_loss = decoder_loss + goal_prob_loss + dense_future_loss
+        total_loss = decoder_loss + goal_prob_loss + goal_reg_loss + dense_future_loss
+        # total_loss = decoder_loss + goal_prob_loss + dense_future_loss
         # total_loss = decoder_loss + goal_FDE_loss + dense_future_loss
         return total_loss
 
@@ -187,19 +197,85 @@ class Criterion(nn.Module):
         total_loss = self.config.get('disp_weight', 1.0) * disp_loss
         return total_loss
     
-    def get_goal_prediction_loss(self, goal_reg, goal_FDE, gt, traj_data):
-        mask = gt[..., -1]
+    # def get_goal_prediction_loss(self, goal_reg, goal_FDE, gt, traj_data):
+    #     mask = gt[..., -1]
         
-        reg_loss = (torch.norm((goal_reg[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1)), 2, dim=-1) * mask[:, -1:])
+    #     reg_loss = (torch.norm((goal_reg[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1)), 2, dim=-1) * mask[:, -1:])
         
-        goal_reg_detached = goal_reg.detach()
-        FDE_gt = (torch.norm(goal_reg_detached[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1), 2, dim=-1) * mask[:, -1:])
-        disp_loss = self.goal_FDE_loss(goal_FDE, FDE_gt)
+    #     goal_reg_detached = goal_reg.detach()
+    #     FDE_gt = (torch.norm(goal_reg_detached[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1), 2, dim=-1) * mask[:, -1:])
+    #     disp_loss = self.goal_FDE_loss(goal_FDE, FDE_gt)
         
-        reg_loss = reg_loss.min(dim=1)[0].mean()
+    #     reg_loss = reg_loss.min(dim=1)[0].mean()
 
-        total_loss = self.config['goal_reg_weight'] * reg_loss + self.config['disp_weight'] * disp_loss
-        return total_loss
+    #     total_loss = self.config['goal_reg_weight'] * reg_loss + self.config['disp_weight'] * disp_loss
+    #     return total_loss
+
+    # def get_goal_prediction_loss(self, goal_reg_list, goal_FDE_list, gt, traj_data):
+    #     mask = gt[..., -1]
+        
+    #     total_loss = 0.0
+    #     num_layers = len(goal_reg_list)
+    #     assert num_layers == len(goal_FDE_list)
+        
+    #     for goal_reg, goal_FDE in zip(goal_reg_list, goal_FDE_list):
+        
+    #         reg_loss = (torch.norm((goal_reg[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1)), 2, dim=-1) * mask[:, -1:])
+            
+    #         goal_reg_detached = goal_reg.detach()
+    #         FDE_gt = (torch.norm(goal_reg_detached[:, :, :2].permute(1, 0, 2) - gt[:, -1, :2].unsqueeze(1), 2, dim=-1) * mask[:, -1:])
+    #         disp_loss = self.goal_FDE_loss(goal_FDE, FDE_gt)
+            
+    #         reg_loss = reg_loss.min(dim=1)[0].mean()
+            
+    #         layer_loss = self.config['goal_reg_weight'] * reg_loss + self.config['disp_weight'] * disp_loss
+    #         total_loss = total_loss + layer_loss
+    #     return (total_loss / num_layers)
+
+    def get_goal_prediction_loss(self, goal_reg_list, goal_FDE_list, gt, center_gt_final_valid_idx):
+        """
+        goal_reg: each [K, B, 2]
+        goal_FDE: each [B, K]
+        gt: [B, T, 3]  # (x, y, valid)
+        center_gt_final_valid_idx: [B]
+        """
+        num_layers = len(goal_reg_list)
+        assert num_layers == len(goal_FDE_list)
+
+        device = gt.device
+        B = gt.size(0)
+        b_idx = torch.arange(B, device=device)
+        final_idx = center_gt_final_valid_idx.long()
+
+        gt_goal = gt[b_idx, final_idx, :2]            # [B, 2]
+        valid_final = gt[b_idx, final_idx, -1].float() # [B]
+        valid_mask = valid_final > 0
+
+        total_loss = 0.0
+        for goal_reg, goal_FDE in zip(goal_reg_list, goal_FDE_list):
+            # ---------------- reg loss ----------------
+            # goal_reg: [K, B, 2] -> [B, K, 2]
+            goal_reg_bk2 = goal_reg.permute(1, 0, 2)
+            dist = torch.norm(goal_reg_bk2 - gt_goal.unsqueeze(1), p=2, dim=-1)  # [B, K]
+            reg_loss_per_sample = dist.min(dim=1)[0]                               # [B]
+            reg_loss = (reg_loss_per_sample * valid_final).sum() / valid_final.sum().clamp_min(1.0)
+
+            # ---------------- FDE loss ----------------
+            with torch.no_grad():
+                FDE_gt = torch.norm(goal_reg_bk2.detach() - gt_goal.unsqueeze(1), p=2, dim=-1)  # [B, K]
+
+            if valid_mask.any():
+                disp_loss = self.goal_FDE_loss(goal_FDE[valid_mask], FDE_gt[valid_mask])
+            else:
+                disp_loss = goal_FDE.sum() * 0.0
+
+            layer_loss = (
+                self.config['goal_reg_weight'] * reg_loss
+                + self.config['disp_weight'] * disp_loss
+            )
+            total_loss = total_loss + layer_loss
+
+        return total_loss / num_layers
 
     def get_dense_future_prediction_loss(self, prediction, gt):
         obj_trajs_future_state = gt['obj_trajs_future_state']

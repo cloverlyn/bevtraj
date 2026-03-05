@@ -228,7 +228,7 @@ MODEL:
                     num_heads: 8
                     num_key_points: 6
 
-        deform_cross_attn_itp:
+        deform_cross_attn:
             dim_head: 64
             num_heads: 8
             num_sampling_points: 16
@@ -245,6 +245,10 @@ MODEL:
         # SGCP loss
         goal_reg_weight: 4.0
         disp_weight: 2.0
+        # goal_prob branch (posterior + entropy + KL)
+        entropy_weight: 0.0
+        kl_weight: 2.0
+        goal_prob_sigma: 4.0
         # decoder loss
         cls_weight: 2.0
         reg_weight: 1.0

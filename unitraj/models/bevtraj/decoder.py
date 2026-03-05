@@ -168,9 +168,10 @@ class BEVTrajDecoder(nn.Module):
         self.L_goal_proposal = config['num_goal_proposal_layers']
         self.L_dec = config['num_decoder_layers']
         self.num_heads = config['num_heads']
+        self.grid_size = config['grid_size']
         
-        self.dca_itp_cfg = config['deform_cross_attn_itp']
-        self.dca_itp_cfg['dim'] = self.D
+        self.dca_cfg = config['deform_cross_attn']
+        self.dca_cfg['dim'] = self.D
 
         self.dca_itr_cfg = config['deform_cross_attn_itr']
         self.dca_itr_cfg['dim'] = self.D
@@ -188,19 +189,38 @@ class BEVTrajDecoder(nn.Module):
         }
         
         # ============================ Goal Candidate Proposal==========================
+
+        # classification
         self.bda_sgcp = BDA_DEC(self.config['bda_dec'], self.D)
         self.goal_score_head = MLP(self.D, self.D, 1, 2)
         # self.goal_FDE = MLP(self.D, self.D, 1, 2)
 
-        self.grid_size = config['grid_size']
+        # regression
+        self.goal_proposal = []
+        for _ in range(self.L_goal_proposal):
+            goal_proposal_layer = nn.ModuleDict({
+                'deform_cross_attn': BEVDeformCrossAttn(**self.dca_cfg),
+                'norm1': nn.LayerNorm(self.D),
+                'mode_self_attn': nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout),
+                'norm2': nn.LayerNorm(self.D),
+                'ffn': FFN(self.D, self.ffn_D, 2),
+                'norm3': nn.LayerNorm(self.D),
+            })
+            self.goal_proposal.append(goal_proposal_layer)
+        self.goal_proposal = nn.ModuleList(self.goal_proposal)
+
+        self.get_query_scale_sgcp = MLP(self.D, self.query_scale_dims, self.query_scale_dims, 2)
+        self.goal_reg = MLP(self.D, self.D, 2, 2)
+        self.goal_FDE = MLP(self.D, self.D, 1, 2)
+
         self.register_buffer('denorm_scale', torch.tensor(self.grid_size, dtype=torch.float32))
 
         # ============================ Initial Prediction ==============================
-        self.get_query_scale_l1 = MLP(self.D, self.query_scale_dims, self.query_scale_dims, 2)
+        self.get_query_scale_itp = MLP(self.D, self.query_scale_dims, self.query_scale_dims, 2)
         self.norm_l1 = nn.ModuleList([nn.LayerNorm(self.D) for _ in range(3)])
         
         self.context_cross_attn_l1 = nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout)
-        self.bev_cross_attn_l1 = BEVDeformCrossAttn(**self.dca_itp_cfg)
+        self.bev_cross_attn_l1 = BEVDeformCrossAttn(**self.dca_cfg)
         self.ffn_l1 = FFN(self.D, self.ffn_D, 2)
         
         self.tmp_MLP = nn.ModuleList([
@@ -223,7 +243,7 @@ class BEVTrajDecoder(nn.Module):
         self.time_emb_alpha = nn.Parameter(torch.tensor(1.0))
         
         # self.mode_sep_enc = ModeSeperationEncoding(self.D, self.dropout, mode_num=self.K, temperature=self.mode_pos_T)
-        self.get_query_scale_T = MLP(self.query_scale_dims, self.query_scale_dims, self.query_scale_dims, 2)
+        self.get_query_scale_itr = MLP(self.query_scale_dims, self.query_scale_dims, self.query_scale_dims, 2)
         
         dec_layer = BEVTrajDecoderLayer(self.dec_layer_config)
         self.dec_layers = nn.ModuleList([copy.deepcopy(dec_layer) for _ in range(self.L_dec - 1)])
@@ -242,6 +262,9 @@ class BEVTrajDecoder(nn.Module):
         return self.time_emb_alpha * pe
 
     def goal_candidate_proposal(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
+
+        # =============================== classification ===============================
+
         bda_token, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
         B, _, D = bda_token.shape
@@ -256,13 +279,45 @@ class BEVTrajDecoder(nn.Module):
         idx_pos = top_idx.unsqueeze(-1).expand(B, self.K, 2)
 
         mode_query = torch.gather(bda_token, dim=1, index=idx_tok).permute(1, 0, 2).contiguous()
-        goal_candidate = torch.gather(bda_pos, dim=1, index=idx_pos)
+        goal_pos = torch.gather(bda_pos, dim=1, index=idx_pos)
 
-        return mode_query, goal_candidate, goal_prob, bda_pos
+        # ================================= regression =================================
+
+        ref_pos = goal_pos.detach()
+
+        trans_x, trans_y, rot_sin, rot_cos = (
+            ego_dyn['ego_x'],
+            ego_dyn['ego_y'],
+            ego_dyn['ego_sin'],
+            ego_dyn['ego_cos'],
+        )
+
+        goal_reg_list = []
+        goal_FDE_list = []
+        for lid, layer in enumerate(self.goal_proposal):
+            query_scale = self.get_query_scale_sgcp(mode_query)
+            ref_pos_ego = target_to_ego(ref_pos, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)
+
+            mode_query = layer['norm1'](layer['deform_cross_attn']( \
+                    dec_embed = mode_query, bev_feat = bev_feat, query_scale = query_scale, ref_points = ref_pos_ego))
+            mode_query = layer['norm2'](layer['mode_self_attn']( \
+                    query = mode_query, key = mode_query, value = mode_query)[0] + mode_query)
+            mode_query = layer['norm3'](layer['ffn'](mode_query))
+
+            tmp = self.goal_reg(mode_query)
+            goal_reg = tmp + ref_pos.permute(1, 0, 2)
+
+            goal_reg_list.append(goal_reg)
+            ref_pos = goal_reg.detach().permute(1, 0, 2)
+
+            goal_FDE = self.goal_FDE(mode_query).squeeze(-1).T
+            goal_FDE_list.append(goal_FDE)
+            
+        return mode_query, goal_prob, bda_pos, goal_reg_list, goal_FDE_list
 
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
         K, B, _ = mode_query.shape
-        query_scale = self.get_query_scale_l1(mode_query)
+        query_scale = self.get_query_scale_itp(mode_query)
         dec_embed = self.norm_l1[0](self.context_cross_attn_l1(query=mode_query, key=scene_context, 
                                                                      value=scene_context)[0] + mode_query)
         
@@ -272,7 +327,7 @@ class BEVTrajDecoder(nn.Module):
             ego_dyn['ego_sin'],
             ego_dyn['ego_cos'],
         )
-        # goal_candidate = goal_candidate.permute(1, 0, 2)
+        goal_candidate = goal_candidate.permute(1, 0, 2)
         goal_candidate = target_to_ego(goal_candidate, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)
         
         # cross attn with scene feature
@@ -298,7 +353,11 @@ class BEVTrajDecoder(nn.Module):
         scene_context = scene_context.permute(1, 0, 2)
 
         # -------------------Goal Candidate Proposal -----------------
-        mode_query, goal_candidate, goal_prob, bda_pos = self.goal_candidate_proposal(bev_feat, ec_dyn, tc_dyn, ego_dyn)
+        mode_query, goal_prob, bda_pos, goal_reg_list, goal_FDE_list = \
+            self.goal_candidate_proposal(
+                bev_feat, ec_dyn, tc_dyn, ego_dyn
+            )
+        goal_candidate = goal_reg_list[-1].detach()
 
         # -------------------- Initial Prediction --------------------
         dec_embed, init_mode_prob, init_pred_traj = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
@@ -315,7 +374,7 @@ class BEVTrajDecoder(nn.Module):
         num_refine_layers = len(self.dec_layers)
         for lid, layer in enumerate(self.dec_layers):
             # is_last_layer = (lid == num_refine_layers - 1)
-            query_scale = self.get_query_scale_T(dec_embed)
+            query_scale = self.get_query_scale_itr(dec_embed)
             dec_embed = layer(
                 dec_embed=dec_embed,
                 scene_context=scene_context_repeat,
@@ -348,9 +407,9 @@ class BEVTrajDecoder(nn.Module):
         output = {'predicted_probability': mode_probs,
                   'predicted_trajectory': pred_trajs,
                   'goal_prob' : goal_prob,
-                #   'goal_FDE' : goal_FDE,
                   'anchor_pos' : bda_pos,
-                  'goal_candidate': goal_candidate,
+                  'goal_reg_list': goal_reg_list,
+                  'goal_FDE_list': goal_FDE_list,
                 }
         return output
     
