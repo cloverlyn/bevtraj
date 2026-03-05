@@ -197,7 +197,11 @@ class BEVDeformCrossAttn(nn.Module):
         pos_q = pos_q * query_scale
         pos_q = pos_q.reshape(B, Q, num_heads, self.head_dim)
         
-        key_sine_embed = gen_sineembed_for_position(vgrid_q, hidden_dim=self.kv_dim, temperature=10000)
+        key_sine_embed = gen_sineembed_for_position(
+            vgrid_q.reshape(B, Q, num_heads * num_points, 2),
+            hidden_dim=self.kv_dim,
+            temperature=10000,
+        ).reshape(B, Q, num_heads, num_points, self.kv_dim)
         pos_k = self.to_pos_k(key_sine_embed)
         
         # split out heads
