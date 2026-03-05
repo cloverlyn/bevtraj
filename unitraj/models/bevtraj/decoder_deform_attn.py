@@ -62,12 +62,8 @@ class BEVDeformCrossAttn(nn.Module):
         dim,
         dim_head = 64,
         num_heads = 8,
-        offset_groups = None,
         num_sampling_points = 6,
         dropout = 0.,
-        offset_scale = 4,
-        x_bounds = [-51.2, 51.2],
-        y_bounds = [-51.2, 51.2],
         grid_size = [51.2, 51.2],
     ):
         super().__init__()
@@ -75,20 +71,10 @@ class BEVDeformCrossAttn(nn.Module):
         inner_dim = dim_head * num_heads
         self.scale = dim_head ** -0.5
         self.num_heads = num_heads
-        self.offset_groups = default(offset_groups, num_heads)  # kept for config compatibility
         self.num_sampling_points = num_sampling_points
         self.kv_dim = inner_dim // 2
         assert divisible_by(self.kv_dim, self.num_heads), "kv dim must be divisible by num_heads"
         self.head_dim = self.kv_dim // self.num_heads
-
-        # self.offset_scale = offset_scale
-        
-        # assert torch.isclose(torch.abs(torch.tensor(x_bounds[0])), 
-                    #  torch.abs(torch.tensor(x_bounds[1]))), "x range must be symmetric"
-        # assert torch.isclose(torch.abs(torch.tensor(y_bounds[0])), 
-                    #  torch.abs(torch.tensor(y_bounds[1]))), "y range must be symmetric"
-        # self.p_w = x_bounds[1] - x_bounds[0]
-        # self.p_h = y_bounds[1] - y_bounds[0]
         
         self.to_con_q = nn.Linear(dim, self.kv_dim)
         self.to_con_k = nn.Conv2d(dim, self.kv_dim, 1, bias = False)
@@ -104,8 +90,6 @@ class BEVDeformCrossAttn(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(self.head_dim, 2 * self.num_sampling_points),
-            # nn.Tanh(),
-            # Scale(offset_scale)
         )
         self.register_buffer('denorm_scale', torch.tensor(grid_size, dtype=torch.float32))
         self.register_buffer('offset_normalizer', torch.tensor(grid_size, dtype=torch.float32))

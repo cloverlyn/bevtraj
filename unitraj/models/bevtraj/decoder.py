@@ -169,9 +169,12 @@ class BEVTrajDecoder(nn.Module):
         self.L_dec = config['num_decoder_layers']
         self.num_heads = config['num_heads']
         
-        self.dca_cfg = config['deform_cross_attn']
-        self.dca_cfg['dim'] = self.D
-        
+        self.dca_itp_cfg = config['deform_cross_attn_itp']
+        self.dca_itp_cfg['dim'] = self.D
+
+        self.dca_itr_cfg = config['deform_cross_attn_itr']
+        self.dca_itr_cfg['dim'] = self.D
+
         self.dec_layer_config = {
             'future_len': self.T,
             'd_model': self.D,
@@ -181,7 +184,7 @@ class BEVTrajDecoder(nn.Module):
             'num_modes': self.K,
             'dropout': self.dropout,
             'num_heads': self.num_heads,
-            'deform_cross_attn': self.dca_cfg,
+            'deform_cross_attn': self.dca_itr_cfg,
         }
         
         # ============================ Goal Candidate Proposal==========================
@@ -197,7 +200,7 @@ class BEVTrajDecoder(nn.Module):
         self.norm_l1 = nn.ModuleList([nn.LayerNorm(self.D) for _ in range(3)])
         
         self.context_cross_attn_l1 = nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout)
-        self.bev_cross_attn_l1 = BEVDeformCrossAttn(**self.dca_cfg)
+        self.bev_cross_attn_l1 = BEVDeformCrossAttn(**self.dca_itp_cfg)
         self.ffn_l1 = FFN(self.D, self.ffn_D, 2)
         
         self.tmp_MLP = nn.ModuleList([

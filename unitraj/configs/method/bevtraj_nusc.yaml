@@ -228,14 +228,18 @@ MODEL:
                     num_heads: 8
                     num_key_points: 6
 
-        deform_cross_attn:
+        deform_cross_attn_itp:
             dim_head: 64
             num_heads: 8
-            offset_groups: 16
+            num_sampling_points: 16
             dropout: 0.1
-            offset_scale: 8 # meter scale
-            x_bounds: [-51.2, 51.2]
-            y_bounds: [-51.2, 51.2]
+            grid_size: *grid_size
+        deform_cross_attn_itr:
+            dim_head: 64
+            num_heads: 8
+            num_sampling_points: 6
+            dropout: 0.1
+            grid_size: *grid_size
 
     loss:
         # SGCP loss
