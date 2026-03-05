@@ -63,10 +63,11 @@ class BEVDeformCrossAttn(nn.Module):
         dim_head = 64,
         num_heads = 8,
         offset_groups = None,
+        num_sampling_points = 6,
         dropout = 0.,
-        offset_scale = 4,
-        x_bounds = [-51.2, 51.2],
-        y_bounds = [-51.2, 51.2],
+        # offset_scale = 4,
+        # x_bounds = [-51.2, 51.2],
+        # y_bounds = [-51.2, 51.2],
         grid_size = [51.2, 51.2],
     ):
         super().__init__()
@@ -74,40 +75,42 @@ class BEVDeformCrossAttn(nn.Module):
         inner_dim = dim_head * num_heads
         self.scale = dim_head ** -0.5
         self.num_heads = num_heads
-        self.offset_groups = default(offset_groups, num_heads)
-
-        offset_dims = inner_dim // self.offset_groups
+        self.offset_groups = default(offset_groups, num_heads)  # kept for config compatibility
+        self.num_sampling_points = num_sampling_points
+        self.kv_dim = inner_dim // 2
+        assert divisible_by(self.kv_dim, self.num_heads), "kv dim must be divisible by num_heads"
+        self.head_dim = self.kv_dim // self.num_heads
 
         # self.offset_scale = offset_scale
         
-        assert torch.isclose(torch.abs(torch.tensor(x_bounds[0])), 
-                     torch.abs(torch.tensor(x_bounds[1]))), "x range must be symmetric"
-        assert torch.isclose(torch.abs(torch.tensor(y_bounds[0])), 
-                     torch.abs(torch.tensor(y_bounds[1]))), "y range must be symmetric"
-        self.p_w = x_bounds[1] - x_bounds[0]
-        self.p_h = y_bounds[1] - y_bounds[0]
+        # assert torch.isclose(torch.abs(torch.tensor(x_bounds[0])), 
+                    #  torch.abs(torch.tensor(x_bounds[1]))), "x range must be symmetric"
+        # assert torch.isclose(torch.abs(torch.tensor(y_bounds[0])), 
+                    #  torch.abs(torch.tensor(y_bounds[1]))), "y range must be symmetric"
+        # self.p_w = x_bounds[1] - x_bounds[0]
+        # self.p_h = y_bounds[1] - y_bounds[0]
         
-        self.to_con_q = nn.Linear(dim, inner_dim//2)
-        self.to_con_k = nn.Conv2d(dim, inner_dim//2, 1, bias = False)
-        self.to_v = nn.Conv2d(dim, inner_dim//2, 1, bias = False)
+        self.to_con_q = nn.Linear(dim, self.kv_dim)
+        self.to_con_k = nn.Conv2d(dim, self.kv_dim, 1, bias = False)
+        self.to_v = nn.Conv2d(dim, self.kv_dim, 1, bias = False)
         
-        self.to_pos_q = MLP(inner_dim//2, inner_dim//2, inner_dim//2, 2)
-        self.to_pos_k = MLP(inner_dim//2, inner_dim//2, inner_dim//2, 2)
+        self.to_pos_q = MLP(self.kv_dim, self.kv_dim, self.kv_dim, 2)
+        self.to_pos_k = MLP(self.kv_dim, self.kv_dim, self.head_dim, 2)
 
         self.dropout = nn.Dropout(dropout)
         
         self.to_offsets = nn.Sequential(
-            nn.Linear(offset_dims//2, offset_dims),
+            nn.Linear(self.head_dim, self.head_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(offset_dims, 2),
+            nn.Linear(self.head_dim, 2 * self.num_sampling_points),
             # nn.Tanh(),
             # Scale(offset_scale)
         )
         self.register_buffer('denorm_scale', torch.tensor(grid_size, dtype=torch.float32))
         self.register_buffer('offset_normalizer', torch.tensor(grid_size, dtype=torch.float32))
 
-        self.to_out = nn.Linear(inner_dim//2, dim)
+        self.to_out = nn.Linear(self.kv_dim, dim)
     
     def forward(self, dec_embed, bev_feat, query_scale, ref_points, identity=None, return_vgrid=False):
         """
@@ -130,70 +133,83 @@ class BEVDeformCrossAttn(nn.Module):
         # dimension handling for ITP/ITR: support (K,B,T,D) and (K,B,D)
             
         has_T = True if dec_embed.dim() == 4 else False
-        num_heads, offset_groups, K, B = self.num_heads, self.offset_groups, *dec_embed.shape[:2]
+        num_heads, num_points, K, B = self.num_heads, self.num_sampling_points, *dec_embed.shape[:2]
         if has_T:
             T = dec_embed.shape[2]
-            BS = B * K * T
             permute_pattern = (1, 0, 2, 3)
-            reshape_pattern = [(B, K, T, offset_groups, -1), (B, K, T, -1)]
         else:
-            BS = B * K
             permute_pattern = (1, 0, 2)
-            reshape_pattern = [(B, K, offset_groups, -1), (B, K, -1)]
             
         dec_embed, query_scale, ref_points = map(lambda t: t.permute(*permute_pattern).contiguous(), (dec_embed, query_scale, ref_points))
         
         # get con_q & calculate offsets 
 
         con_q = self.to_con_q(dec_embed)
-        offsets = self.to_offsets(con_q.reshape(*reshape_pattern[0]))
+        if has_T:
+            B, K, T, _ = con_q.shape
+            Q = K * T
+            con_q = con_q.reshape(B, K, T, num_heads, self.head_dim)
+            offsets = self.to_offsets(con_q).reshape(B, K, T, num_heads, num_points, 2)
+            ref_pos_norm = ref_points[:, :, :, None, None, :] / self.denorm_scale[None, None, None, None, None, :]
+            vgrid_scaled = ref_pos_norm + offsets / self.offset_normalizer[None, None, None, None, None, :]
+            vgrid = vgrid_scaled * self.denorm_scale[None, None, None, None, None, :]
+            vgrid_q = vgrid.reshape(B, Q, num_heads, num_points, 2)
+            vgrid_scaled_q = vgrid_scaled.reshape(B, Q, num_heads, num_points, 2)
+        else:
+            B, K, _ = con_q.shape
+            Q = K
+            con_q = con_q.reshape(B, K, num_heads, self.head_dim)
+            offsets = self.to_offsets(con_q).reshape(B, K, num_heads, num_points, 2)
+            ref_pos_norm = ref_points[:, :, None, None, :] / self.denorm_scale[None, None, None, None, :]
+            vgrid_scaled = ref_pos_norm + offsets / self.offset_normalizer[None, None, None, None, :]
+            vgrid = vgrid_scaled * self.denorm_scale[None, None, None, None, :]
+            vgrid_q = vgrid.reshape(B, Q, num_heads, num_points, 2)
+            vgrid_scaled_q = vgrid_scaled.reshape(B, Q, num_heads, num_points, 2)
 
         # calculate grid + offsets
 
-        # vgrid = ref_points.unsqueeze(-2) + offsets
-        # if has_T:
-        #     vgrid = vgrid.reshape(B, K*T, offset_groups, -1)
-        # vgrid_scaled = normalize_grid(vgrid, w=self.p_w, h=self.p_h, dim=-1, out_dim=-1, ref_from_Q=True)
-        # vgrid_scaled_fliped = vgrid_scaled.clone()
-        # vgrid_scaled_fliped[..., -1] = vgrid_scaled_fliped[..., -1] * -1 # Align with F.grid_sample coordinate system
-
-        ref_pos_norm = ref_points / self.denorm_scale[None, None, :] # normalizing
-        vgrid_scaled = ref_pos_norm.unsqueeze(-2) + offsets / self.offset_normalizer[None, None, None, :]
-        if has_T:
-            vgrid_scaled = vgrid_scaled.reshape(B, K*T, offset_groups, -1)
-        vgrid = vgrid_scaled * self.denorm_scale[None, None, None, :] # denormalizing
-        vgrid_scaled_fliped = vgrid_scaled.clone()
+        vgrid_scaled_fliped = vgrid_scaled_q.clone()
         vgrid_scaled_fliped[..., -1] = vgrid_scaled_fliped[..., -1] * -1 # Align with F.grid_sample coordinate system
+        vgrid_scaled_fliped = vgrid_scaled_fliped.permute(0, 2, 1, 3, 4).reshape(B * num_heads, Q, num_points, 2)
         
         # get con_k / values
 
-        gs = lambda x: F.grid_sample(
-            x, vgrid_scaled_fliped,
-            mode = 'bilinear', padding_mode = 'zeros', align_corners = False
-        )
+        def gs(x):
+            _, _, H, W = x.shape
+            x = x.reshape(B, num_heads, self.head_dim, H, W).reshape(B * num_heads, self.head_dim, H, W)
+            x = F.grid_sample(
+                x,
+                vgrid_scaled_fliped,
+                mode='bilinear',
+                padding_mode='zeros',
+                align_corners=False
+            )
+            x = x.reshape(B, num_heads, self.head_dim, Q, num_points).permute(0, 3, 1, 4, 2)
+            return x
+
         con_k = gs(self.to_con_k(bev_feat))
         v = gs(self.to_v(bev_feat))
         
         # get pos_q, pos_k
         
-        # ref_scaled = normalize_grid(ref_points, w=self.p_w, h=self.p_h, dim=-1, out_dim=-1, ref_from_Q=True)
-        query_sine_embed = gen_sineembed_for_position(ref_points, hidden_dim=256, temperature=10000)
+        query_sine_embed = gen_sineembed_for_position(ref_points, hidden_dim=self.kv_dim, temperature=10000)
         pos_q = self.to_pos_q(query_sine_embed)
         pos_q = pos_q * query_scale
+        pos_q = pos_q.reshape(B, Q, num_heads, self.head_dim)
         
-        key_sine_embed = gen_sineembed_for_position(vgrid, hidden_dim=256, temperature=10000)
+        key_sine_embed = gen_sineembed_for_position(vgrid_q, hidden_dim=self.kv_dim, temperature=10000)
         pos_k = self.to_pos_k(key_sine_embed)
         
         # split out heads
-        
-        con_q, pos_q = map(lambda t: t.unsqueeze(-2), (con_q, pos_q))
-        con_k, v = map(lambda t: t.permute(0, 2, 3, 1), (con_k, v))
-        
-        con_q, con_k, pos_q, pos_k, v = [t[0].reshape(BS, t[1], num_heads, -1) \
-            for t in ((con_q, 1), (con_k, offset_groups), (pos_q, 1), (pos_k, offset_groups), (v, offset_groups))]
-        
-        q, k = map(lambda t: torch.cat(t, dim=-1), ([con_q, pos_q], [con_k, pos_k]))
-        q, k, v = map(lambda t: t.permute(0, 2, 1, 3), (q, k, v))
+        BS = B * Q
+        con_q = con_q.reshape(BS, num_heads, 1, self.head_dim)
+        pos_q = pos_q.reshape(BS, num_heads, 1, self.head_dim)
+        con_k = con_k.reshape(BS, num_heads, num_points, self.head_dim)
+        pos_k = pos_k.reshape(BS, num_heads, num_points, self.head_dim)
+        v = v.reshape(BS, num_heads, num_points, self.head_dim)
+
+        q = torch.cat([con_q, pos_q], dim=-1)
+        k = torch.cat([con_k, pos_k], dim=-1)
         
         # multi-head attention
 
@@ -205,8 +221,12 @@ class BEVDeformCrossAttn(nn.Module):
         attn = sim.softmax(dim = -1)
         attn = self.dropout(attn)
 
-        out = einsum('b h i j, b h j d -> b h i d', attn, v)
-        out = out.permute(0, 2, 1, 3).reshape(*reshape_pattern[1]).permute(*permute_pattern)
+        out = einsum('b h i j, b h j d -> b h i d', attn, v).squeeze(2)
+        out = out.reshape(B, Q, self.kv_dim)
+        if has_T:
+            out = out.reshape(B, K, T, self.kv_dim).permute(*permute_pattern)
+        else:
+            out = out.reshape(B, K, self.kv_dim).permute(*permute_pattern)
         out = self.to_out(out)
 
         if return_vgrid:
