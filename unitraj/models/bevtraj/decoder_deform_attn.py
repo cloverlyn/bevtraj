@@ -65,9 +65,9 @@ class BEVDeformCrossAttn(nn.Module):
         offset_groups = None,
         num_sampling_points = 6,
         dropout = 0.,
-        # offset_scale = 4,
-        # x_bounds = [-51.2, 51.2],
-        # y_bounds = [-51.2, 51.2],
+        offset_scale = 4,
+        x_bounds = [-51.2, 51.2],
+        y_bounds = [-51.2, 51.2],
         grid_size = [51.2, 51.2],
     ):
         super().__init__()
