@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from omegaconf import OmegaConf
 
@@ -70,7 +71,8 @@ class BEVTraj(BaseModel):
         output['dense_future_pred'] = dense_future_pred
         loss = self.get_loss(traj_data, output)
         
-        last_prob = output['predicted_probability'][-1]
+        last_logit = output['predicted_probability'][-1]
+        last_prob = F.softmax(last_logit, dim=-1)
         last_traj = output['predicted_trajectory'][-1].permute(2, 0, 1, 3)
 
         goal_candidate = output['goal_reg_list'][-1] # (K, B, 2)
