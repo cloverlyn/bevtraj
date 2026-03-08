@@ -22,6 +22,8 @@ class Criterion(nn.Module):
 
         dense_future_pred = out['dense_future_pred']
 
+        state_pred = out['state_pred']
+
         gt_decoder = gt[0]
         gt_dense_future_trajs = gt[1]
         
@@ -42,15 +44,19 @@ class Criterion(nn.Module):
             gt=gt_decoder,
             center_gt_final_valid_idx=center_gt_final_valid_idx,
         )
-
         goal_reg_loss = self.get_goal_prediction_loss(
             goal_reg_list=goal_reg_list,
             gt=gt_decoder,
             center_gt_final_valid_idx=center_gt_final_valid_idx,
         )
+        state_query_loss = self.get_state_query_loss(
+            state_pred=state_pred,
+            gt=gt_decoder,
+        )
+
         dense_future_loss = self.get_dense_future_prediction_loss(dense_future_pred, gt_dense_future_trajs)
 
-        total_loss = decoder_loss + goal_prob_loss + goal_reg_loss + dense_future_loss
+        total_loss = decoder_loss + goal_prob_loss + goal_reg_loss + dense_future_loss + state_query_loss
         return total_loss
 
     # def get_decoder_loss_hard_assign(
@@ -115,7 +121,7 @@ class Criterion(nn.Module):
 
     #     return total / len(preds)
 
-    def get_decoder_loss_hard_assign(
+    def get_decoder_loss_hard_assign( # EDA
         self,
         modes_preds,                 # list of [B, K]
         preds,                       # list of [K, T, B, 5]
@@ -308,6 +314,20 @@ class Criterion(nn.Module):
             total_loss = total_loss + self.config['goal_reg_weight'] * reg_loss
 
         return total_loss / num_layers
+    
+    def get_state_query_loss(self, state_pred, gt):
+        """
+        state_pred: [B, T, 2]
+        gt:         [B, T, 3]  (x, y, valid)
+        """
+        gt_xy = gt[..., :2]
+        gt_mask = gt[..., 2].float()  # [B,T]
+
+        loss_xy = F.smooth_l1_loss(state_pred, gt_xy, reduction='none').sum(dim=-1)  # [B,T]
+        loss_xy = (loss_xy * gt_mask).sum() / gt_mask.sum().clamp_min(1.0)
+
+        w = float(self.config.get('state_query_weight', 1.0))
+        return w * loss_xy
 
     def get_dense_future_prediction_loss(self, prediction, gt):
         obj_trajs_future_state = gt['obj_trajs_future_state']

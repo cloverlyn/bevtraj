@@ -182,12 +182,20 @@ class BEVTrajDecoder(nn.Module):
         self.bev_cross_attn_l1 = BEVDeformCrossAttn(**self.dca_cfg)
         self.ffn_l1 = FFN(self.D, self.ffn_D, 2)
         
-        self.tmp_MLP = nn.ModuleList([
-            nn.Sequential(nn.Linear(self.D, self.T_D * self.T), nn.GELU()),
-            nn.Sequential(nn.Linear(self.T_D, self.D), nn.GELU())
-        ])
+        # self.tmp_MLP = nn.ModuleList([
+        #     nn.Sequential(nn.Linear(self.D, self.T_D * self.T), nn.GELU()),
+        #     nn.Sequential(nn.Linear(self.T_D, self.D), nn.GELU())
+        # ])
         self.motion_cls_l1 = MotionClsHead(self.D, self.T_D, self.T)
         self.motion_reg_l1 = MotionRegHead(self.D)
+
+        # exp: DeMo-like ITP (state consistency branch)
+        self.state_norm_l1 = nn.ModuleList([nn.LayerNorm(self.D) for _ in range(2)])
+        self.state_context_cross_attn_l1 = nn.MultiheadAttention(self.D, self.num_heads, dropout=self.dropout)
+        self.state_temp_self_attn_l1 = TemporalMHA_NoTimePE(self.D, self.num_heads, self.dropout)
+        # state query auxiliary prediction head (B,T,2 supervision)
+        self.state_reg_l1 = MLP(self.D, self.D, 2, 2)
+
 
         # ============================ Iterative Refinement ============================
 
@@ -278,34 +286,103 @@ class BEVTrajDecoder(nn.Module):
         # return mode_query, goal_prob, bda_pos, goal_reg_list, goal_FDE_list
         return mode_query, bda_pos, goal_reg_list, goal_prob_list
 
-    def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
-        K, B, _ = mode_query.shape
-        query_scale = self.get_query_scale_itp(mode_query)
-        dec_embed = self.norm_l1[0](self.context_cross_attn_l1(query=mode_query, key=scene_context, 
-                                                                     value=scene_context)[0] + mode_query)
+    # def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
+    #     K, B, _ = mode_query.shape
+    #     query_scale = self.get_query_scale_itp(mode_query)
+    #     dec_embed = self.norm_l1[0](self.context_cross_attn_l1(query=mode_query, key=scene_context, 
+    #                                                                  value=scene_context)[0] + mode_query)
         
+    #     trans_x, trans_y, rot_sin, rot_cos = (
+    #         ego_dyn['ego_x'],
+    #         ego_dyn['ego_y'],
+    #         ego_dyn['ego_sin'],
+    #         ego_dyn['ego_cos'],
+    #     )
+    #     goal_candidate = goal_candidate.permute(1, 0, 2)
+    #     goal_candidate = target_to_ego(goal_candidate, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)
+        
+    #     # cross attn with scene feature
+    #     dec_embed = self.norm_l1[1](self.bev_cross_attn_l1(dec_embed=dec_embed, bev_feat=bev_feat,
+    #                                                              query_scale = query_scale, ref_points = goal_candidate))
+    #     dec_embed = self.norm_l1[2](self.ffn_l1(dec_embed))
+        
+    #     dec_embed_T = self.tmp_MLP[0](dec_embed).reshape(K, B, self.T, -1)
+    #     dec_embed_T = self.tmp_MLP[1](dec_embed_T)
+        
+    #     # mode_prob = F.softmax(self.motion_cls_l1(dec_embed_T), dim=0).squeeze(dim=-1).T
+    #     mode_prob = self.motion_cls_l1(dec_embed_T).squeeze(dim=-1).T
+    #     out_dist = self.motion_reg_l1(dec_embed_T)
+        
+    #     return dec_embed_T, mode_prob, out_dist
+
+    def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
+        """
+        mode_query:    [K, B, D]
+        scene_context: [n, B, D]
+        """
+        K, B, _ = mode_query.shape
+
+        # ===================== mode localization branch =====================
+        query_scale = self.get_query_scale_itp(mode_query)
+        mode_embed = self.norm_l1[0](
+            self.context_cross_attn_l1(
+                query=mode_query, key=scene_context, value=scene_context
+            )[0] + mode_query
+        )
+
         trans_x, trans_y, rot_sin, rot_cos = (
             ego_dyn['ego_x'],
             ego_dyn['ego_y'],
             ego_dyn['ego_sin'],
             ego_dyn['ego_cos'],
         )
-        goal_candidate = goal_candidate.permute(1, 0, 2)
-        goal_candidate = target_to_ego(goal_candidate, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)
-        
-        # cross attn with scene feature
-        dec_embed = self.norm_l1[1](self.bev_cross_attn_l1(dec_embed=dec_embed, bev_feat=bev_feat,
-                                                                 query_scale = query_scale, ref_points = goal_candidate))
-        dec_embed = self.norm_l1[2](self.ffn_l1(dec_embed))
-        
-        dec_embed_T = self.tmp_MLP[0](dec_embed).reshape(K, B, self.T, -1)
-        dec_embed_T = self.tmp_MLP[1](dec_embed_T)
-        
-        # mode_prob = F.softmax(self.motion_cls_l1(dec_embed_T), dim=0).squeeze(dim=-1).T
+        goal_candidate = goal_candidate.permute(1, 0, 2)  # [B, K, 2]
+        goal_candidate = target_to_ego(goal_candidate, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)  # [K, B, 2]
+
+        mode_embed = self.norm_l1[1](
+            self.bev_cross_attn_l1(
+                dec_embed=mode_embed,
+                bev_feat=bev_feat,
+                query_scale=query_scale,
+                ref_points=goal_candidate,
+            )
+        )
+        mode_embed = self.norm_l1[2](self.ffn_l1(mode_embed))  # [K, B, D]
+
+        # ===================== state consistency branch (no K expansion) =====================
+        # state query init: [T, B, D]
+        t = (self.future_time * self.dt + 0.1).to(device=mode_query.device, dtype=mode_query.dtype)  # [T,1]
+        state_query = self.time_emb_alpha * self.time_embedding_mlp(t)  # [T,D]
+        state_query = state_query.unsqueeze(1).repeat(1, B, 1)  # [T,B,D]
+
+        # scene cross-attn
+        state_query = self.state_norm_l1[0](
+            self.state_context_cross_attn_l1(
+                query=state_query, key=scene_context, value=scene_context
+            )[0] + state_query
+        )
+
+        # temporal self-attn (NoTimePE)
+        state_query = self.state_norm_l1[1](
+            self.state_temp_self_attn_l1(state_query, None) + state_query
+        )  # [T,B,D]
+
+        # auxiliary state trajectory prediction: [B,T,2]
+        state_pred = self.state_reg_l1(state_query).permute(1, 0, 2).contiguous()
+
+        # ===================== hybrid coupling =====================
+        # mode: [K,B,D] -> [B,K,1,D]
+        # state: [T,B,D] -> [B,1,T,D]
+        mode_bt = mode_embed.permute(1, 0, 2).unsqueeze(2)
+        state_bt = state_query.permute(1, 0, 2).unsqueeze(1)
+        dec_embed_T = mode_bt + state_bt  # [B,K,T,D]
+        dec_embed_T = dec_embed_T.permute(1, 0, 2, 3).contiguous()  # [K,B,T,D]
+
         mode_prob = self.motion_cls_l1(dec_embed_T).squeeze(dim=-1).T
         out_dist = self.motion_reg_l1(dec_embed_T)
-        
-        return dec_embed_T, mode_prob, out_dist
+
+        return dec_embed_T, mode_prob, out_dist, state_pred
+
 
     def forward(self, scene_context, bev_feat, ec_dyn, tc_dyn, ego_dyn, **kwargs):
 
@@ -324,7 +401,7 @@ class BEVTrajDecoder(nn.Module):
         goal_candidate = goal_reg_list[-1].detach()
 
         # -------------------- Initial Prediction --------------------
-        dec_embed, init_mode_prob, init_pred_traj = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
+        dec_embed, init_mode_prob, init_pred_traj, state_pred = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
         
         ref_points = init_pred_traj[..., :2].detach().clone()
         mode_probs = [init_mode_prob]
@@ -377,6 +454,7 @@ class BEVTrajDecoder(nn.Module):
                   'anchor_pos' : bda_pos,
                   'goal_reg_list': goal_reg_list,
                   'goal_prob_list' : goal_prob_list,
+                  'state_pred': state_pred, # [B, T, 2]
                 #   'goal_FDE_list': goal_FDE_list,
                 }
         return output
