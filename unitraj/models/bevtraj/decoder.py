@@ -357,10 +357,13 @@ class BEVTrajDecoder(nn.Module):
             #     pred_traj = self.motion_reg_final(dec_embed)
             # else:
                 # intermediate layers: iterative refinement
-            pred_traj_raw = self.motion_reg(dec_embed)          # [K, B, T, 5]
-            pred_xy = pred_traj_raw[..., :2] + ref_points       # out-of-place
-            pred_traj = torch.cat([pred_xy, pred_traj_raw[..., 2:]], dim=-1)
-            ref_points = pred_xy.detach().clone() 
+            # pred_traj_raw = self.motion_reg(dec_embed)          # [K, B, T, 5]
+            # pred_xy = pred_traj_raw[..., :2] + ref_points       # out-of-place
+            # pred_traj = torch.cat([pred_xy, pred_traj_raw[..., 2:]], dim=-1)
+            # ref_points = pred_xy.detach().clone() 
+
+            pred_traj = self.motion_reg(dec_embed)          # [K, B, T, 5]
+            ref_points = pred_traj.detach().clone()[..., :2]
 
             pred_traj = pred_traj.permute(0, 2, 1, 3)
                 
