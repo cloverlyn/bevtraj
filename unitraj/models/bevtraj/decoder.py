@@ -14,22 +14,22 @@ from unitraj.models.bevtraj.utility import gen_sineembed_for_position, target_to
 from unitraj.models.bevtraj.temporal_attn import TemporalMHA, TemporalMHA_NoTimePE
 
 
-class TemporalPositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, future_len=12, temperature=500.0):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
+# class TemporalPositionalEncoding(nn.Module):
+#     def __init__(self, d_model, dropout=0.1, future_len=12, temperature=500.0):
+#         super().__init__()
+#         self.dropout = nn.Dropout(p=dropout)
 
-        pe = torch.zeros(future_len, d_model)
-        position = torch.arange(0, future_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float()
-                             * (-math.log(temperature) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))
+#         pe = torch.zeros(future_len, d_model)
+#         position = torch.arange(0, future_len).unsqueeze(1).float()
+#         div_term = torch.exp(torch.arange(0, d_model, 2).float()
+#                              * (-math.log(temperature) / d_model))
+#         pe[:, 0::2] = torch.sin(position * div_term)
+#         pe[:, 1::2] = torch.cos(position * div_term)
+#         self.register_buffer("pe", pe.unsqueeze(0))
 
-    def forward(self, x):
-        x = x + self.pe[:, :x.size(1)]
-        return self.dropout(x)
+#     def forward(self, x):
+#         x = x + self.pe[:, :x.size(1)]
+#         return self.dropout(x)
 
 
 class BEVTrajDecoderLayer(nn.Module):
@@ -238,7 +238,7 @@ class BEVTrajDecoder(nn.Module):
         self.motion_reg_final = MotionRegHead(self.D)
 
         # exp: sample-conditioned deterministic code
-        self.temp_pos_enc = TemporalPositionalEncoding(self.D, self.dropout, future_len=self.T, temperature=10000)
+        # self.temp_pos_enc = TemporalPositionalEncoding(self.D, self.dropout, future_len=self.T, temperature=10000)
 
     def build_time_pe(self, B, K, dtype):
         t = self.future_time * self.dt + 0.1
@@ -431,7 +431,7 @@ class BEVTrajDecoder(nn.Module):
         dec_embed = dec_embed.permute(2, 1, 0, 3).reshape(self.T, B * self.K, -1)
 
         # exp: sample-conditioned deterministic code
-        dec_embed = self.temp_pos_enc(dec_embed)
+        # dec_embed = self.temp_pos_enc(dec_embed)
 
         # exp: temporal PE (time_embedding_mlp)
         time_pe = self.build_time_pe(B, self.K, dec_embed.dtype)
