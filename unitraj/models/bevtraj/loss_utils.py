@@ -28,7 +28,9 @@ class Criterion(nn.Module):
         gt_dense_future_trajs = gt[1]
         
         # iterative decoder loss: SGCP hard assignment
-        goal_candidate = out['goal_reg_list'][-1].permute(1, 0, 2)
+        goal_candidate_full = out['goal_reg_list'][-1].permute(1, 0, 2)  # [B, 64, 2]
+        goal_candidate_topk = out['goal_candidate_topk']                   # [B, K, 2]
+        goal_candidate = [goal_candidate_full, goal_candidate_topk]
         decoder_loss = self.get_decoder_loss_hard_assign(
             modes_preds=modes_preds,
             preds=preds,
@@ -125,7 +127,7 @@ class Criterion(nn.Module):
         self,
         modes_preds,                 # list of [B, K]
         preds,                       # list of [K, T, B, 5]
-        goal_candidate,              # [B, K, 2] (SGCP top-k candidate)
+        goal_candidate,              # [goal_candidate_full[B,64,2], goal_candidate_topk[B,K,2]]
         gt_decoder,                  # [B, T, 3] -> (x, y, valid)
         center_gt_final_valid_idx,   # [B]
     ):
@@ -139,9 +141,9 @@ class Criterion(nn.Module):
         gt_goal = gt_xy[b_idx, final_idx]               # [B, 2]
         valid_final = gt_mask[b_idx, final_idx]         # [B]
 
-        # initial positive idx from SGCP goal candidate
+        # initial positive idx from SGCP goal candidate (full set)
         with torch.no_grad():
-            dist = (goal_candidate.detach() - gt_goal[:, None, :]).norm(dim=-1)  # [B, K]
+            dist = (goal_candidate[0].detach() - gt_goal[:, None, :]).norm(dim=-1)  # [B, 64]
             hard_idx = dist.argmin(dim=-1)                                        # [B]
 
         w_cls = self.config.get('cls_weight', 2.0)
@@ -161,6 +163,7 @@ class Criterion(nn.Module):
             is_last_layer = (layer_idx == num_layers - 1)
             cur_w_cls = w_cls_final if is_last_layer else w_cls
             cur_w_reg = w_reg_final if is_last_layer else w_reg
+            goal_candidate_cur = goal_candidate[0] if layer_idx == 0 else goal_candidate[1]
 
             # pred: [K, T, B, 5] -> [B, K, T, 5]
             pred_trajs = pred.permute(2, 0, 1, 3).contiguous()
@@ -168,9 +171,9 @@ class Criterion(nn.Module):
             # ---------- Evolving Anchors ----------
             positive_layer_idx = (layer_idx // num_inter_layers) * num_inter_layers - 1
             if positive_layer_idx < 0:
-                # first stage anchor: SGCP goal candidates [B, K, 2]
-                anchor_trajs = goal_candidate.detach().unsqueeze(2)  # [B, K, 1, 2]
-                dist = (goal_candidate.detach() - gt_goal[:, None, :]).norm(dim=-1)  # [B, K]
+                # first-stage anchor from SGCP goal candidates
+                anchor_trajs = goal_candidate_cur.detach().unsqueeze(2)
+                dist = (goal_candidate_cur.detach() - gt_goal[:, None, :]).norm(dim=-1)
             else:
                 # use previous anchor trajectories
                 anchor_trajs = preds[positive_layer_idx].permute(2, 0, 1, 3).detach()  # [B, K, T, 5]

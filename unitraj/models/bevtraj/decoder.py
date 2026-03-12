@@ -261,10 +261,14 @@ class BEVTrajDecoder(nn.Module):
         goal_prob  = F.softmax(goal_logit, dim=-1)
 
         # top-k
-        _, top_idx = torch.topk(goal_prob, k=self.K, dim=-1)
+        num_goal = 64 # hard code
+        # _, top_idx = torch.topk(goal_prob, k=self.K, dim=-1)
+        _, top_idx = torch.topk(goal_prob, k=num_goal, dim=-1)
 
-        idx_tok = top_idx.unsqueeze(-1).expand(B, self.K, D)
-        idx_pos = top_idx.unsqueeze(-1).expand(B, self.K, 2)
+        # idx_tok = top_idx.unsqueeze(-1).expand(B, self.K, D)
+        # idx_pos = top_idx.unsqueeze(-1).expand(B, self.K, 2)
+        idx_tok = top_idx.unsqueeze(-1).expand(B, num_goal, D)
+        idx_pos = top_idx.unsqueeze(-1).expand(B, num_goal, 2)
 
         mode_query = torch.gather(bda_token, dim=1, index=idx_tok).permute(1, 0, 2).contiguous()
         goal_pos = torch.gather(bda_pos, dim=1, index=idx_pos)
@@ -307,44 +311,17 @@ class BEVTrajDecoder(nn.Module):
         # return mode_query, goal_prob, bda_pos, goal_reg_list, goal_FDE_list
         return mode_query, bda_pos, goal_reg_list, goal_prob_list
 
-    # def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
-    #     K, B, _ = mode_query.shape
-    #     query_scale = self.get_query_scale_itp(mode_query)
-    #     dec_embed = self.norm_l1[0](self.context_cross_attn_l1(query=mode_query, key=scene_context, 
-    #                                                                  value=scene_context)[0] + mode_query)
-        
-    #     trans_x, trans_y, rot_sin, rot_cos = (
-    #         ego_dyn['ego_x'],
-    #         ego_dyn['ego_y'],
-    #         ego_dyn['ego_sin'],
-    #         ego_dyn['ego_cos'],
-    #     )
-    #     goal_candidate = goal_candidate.permute(1, 0, 2)
-    #     goal_candidate = target_to_ego(goal_candidate, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)
-        
-    #     # cross attn with scene feature
-    #     dec_embed = self.norm_l1[1](self.bev_cross_attn_l1(dec_embed=dec_embed, bev_feat=bev_feat,
-    #                                                              query_scale = query_scale, ref_points = goal_candidate))
-    #     dec_embed = self.norm_l1[2](self.ffn_l1(dec_embed))
-        
-    #     dec_embed_T = self.tmp_MLP[0](dec_embed).reshape(K, B, self.T, -1)
-    #     dec_embed_T = self.tmp_MLP[1](dec_embed_T)
-        
-    #     # mode_prob = F.softmax(self.motion_cls_l1(dec_embed_T), dim=0).squeeze(dim=-1).T
-    #     mode_prob = self.motion_cls_l1(dec_embed_T).squeeze(dim=-1).T
-    #     out_dist = self.motion_reg_l1(dec_embed_T)
-        
-    #     return dec_embed_T, mode_prob, out_dist
-
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
         """
-        mode_query:    [K, B, D]
+        mode_query:    [M, B, D]   (M = 64)
         scene_context: [n, B, D]
         """
-        K, B, _ = mode_query.shape
+        M, B, _ = mode_query.shape
+        K = self.K  # 최종 사용할 mode 수 (10)
 
         # ===================== mode localization branch =====================
         query_scale = self.get_query_scale_itp(mode_query)
+
         mode_embed = self.norm_l1[0](
             self.context_cross_attn_l1(
                 query=mode_query, key=scene_context, value=scene_context
@@ -357,8 +334,11 @@ class BEVTrajDecoder(nn.Module):
             ego_dyn['ego_sin'],
             ego_dyn['ego_cos'],
         )
-        goal_candidate = goal_candidate.permute(1, 0, 2)  # [B, K, 2]
-        goal_candidate = target_to_ego(goal_candidate, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)  # [K, B, 2]
+
+        goal_candidate_target = goal_candidate.permute(1, 0, 2)  # [B, M, 2] (target coord)
+        goal_candidate = target_to_ego(
+            goal_candidate_target, trans_x, trans_y, rot_sin, rot_cos
+        ).permute(1, 0, 2)  # [M, B, 2] (ego coord for BEV cross-attn)
 
         mode_embed = self.norm_l1[1](
             self.bev_cross_attn_l1(
@@ -368,42 +348,57 @@ class BEVTrajDecoder(nn.Module):
                 ref_points=goal_candidate,
             )
         )
-        mode_embed = self.norm_l1[2](self.ffn_l1(mode_embed))  # [K, B, D]
 
-        # ===================== state consistency branch (no K expansion) =====================
-        # state query init: [T, B, D]
-        t = (self.future_time * self.dt + 0.1).to(device=mode_query.device, dtype=mode_query.dtype)  # [T,1]
+        mode_embed = self.norm_l1[2](self.ffn_l1(mode_embed))  # [M,B,D]
+
+        # ===================== state consistency branch =====================
+        t = (self.future_time * self.dt + 0.1).to(
+            device=mode_query.device, dtype=mode_query.dtype
+        )
+
         state_query = self.time_emb_alpha * self.time_embedding_mlp(t)  # [T,D]
         state_query = state_query.unsqueeze(1).repeat(1, B, 1)  # [T,B,D]
 
-        # scene cross-attn
         state_query = self.state_norm_l1[0](
             self.state_context_cross_attn_l1(
                 query=state_query, key=scene_context, value=scene_context
             )[0] + state_query
         )
 
-        # temporal self-attn (NoTimePE)
         state_query = self.state_norm_l1[1](
             self.state_temp_self_attn_l1(state_query, None) + state_query
-        )  # [T,B,D]
+        )
 
-        # auxiliary state trajectory prediction: [B,T,2]
         state_pred = self.state_reg_l1(state_query).permute(1, 0, 2).contiguous()
 
         # ===================== hybrid coupling =====================
-        # mode: [K,B,D] -> [B,K,1,D]
-        # state: [T,B,D] -> [B,1,T,D]
-        mode_bt = mode_embed.permute(1, 0, 2).unsqueeze(2)
-        state_bt = state_query.permute(1, 0, 2).unsqueeze(1)
-        dec_embed_T = mode_bt + state_bt  # [B,K,T,D]
-        dec_embed_T = dec_embed_T.permute(1, 0, 2, 3).contiguous()  # [K,B,T,D]
+        mode_bt = mode_embed.permute(1, 0, 2).unsqueeze(2)  # [B,M,1,D]
+        state_bt = state_query.permute(1, 0, 2).unsqueeze(1)  # [B,1,T,D]
 
-        mode_prob = self.motion_cls_l1(dec_embed_T).squeeze(dim=-1).T
-        out_dist = self.motion_reg_l1(dec_embed_T)
+        dec_embed_T = mode_bt + state_bt  # [B,M,T,D]
+        dec_embed_T = dec_embed_T.permute(1, 0, 2, 3).contiguous()  # [M,B,T,D]
 
-        return dec_embed_T, mode_prob, out_dist, state_pred
+        # ===================== trajectory prediction =====================
+        mode_prob = self.motion_cls_l1(dec_embed_T).squeeze(dim=-1).T  # [B,M]
+        out_dist = self.motion_reg_l1(dec_embed_T)  # [M,B,T,5]
 
+        # ===================== top-K selection =====================
+        _, top_idx = torch.topk(mode_prob, K, dim=1)  # [B,K]
+
+        # gather indices
+        idx_mode = top_idx.permute(1,0)  # [K,B]
+
+        idx_embed = idx_mode.unsqueeze(-1).unsqueeze(-1).expand(K, B, self.T, self.D)
+        dec_embed_T = torch.gather(dec_embed_T, dim=0, index=idx_embed)
+
+        idx_traj = idx_mode.unsqueeze(-1).unsqueeze(-1).expand(K, B, self.T, 5)
+        out_dist_K = torch.gather(out_dist, dim=0, index=idx_traj)
+
+        # goal candidates in target coord selected by initial_prediction top-k
+        idx_goal = top_idx.unsqueeze(-1).expand(B, K, 2)
+        goal_candidate_topk = torch.gather(goal_candidate_target, dim=1, index=idx_goal)  # [B, K, 2]
+
+        return dec_embed_T, mode_prob, out_dist, out_dist_K, state_pred, goal_candidate_topk
 
     def forward(self, scene_context, bev_feat, ec_dyn, tc_dyn, ego_dyn, **kwargs):
 
@@ -422,9 +417,11 @@ class BEVTrajDecoder(nn.Module):
         goal_candidate = goal_reg_list[-1].detach()
 
         # -------------------- Initial Prediction --------------------
-        dec_embed, init_mode_prob, init_pred_traj, state_pred = self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
+        dec_embed, init_mode_prob, init_pred_traj, init_pred_traj_K, state_pred, goal_candidate_topk = \
+            self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
         
-        ref_points = init_pred_traj[..., :2].detach().clone()
+        # ref_points = init_pred_traj[..., :2].detach().clone()
+        ref_points = init_pred_traj_K[..., :2].detach().clone()
         mode_probs = [init_mode_prob]
         pred_trajs = [init_pred_traj.permute(0, 2, 1, 3)]
         
@@ -478,6 +475,8 @@ class BEVTrajDecoder(nn.Module):
                   'anchor_pos' : bda_pos,
                   'goal_reg_list': goal_reg_list,
                   'goal_prob_list' : goal_prob_list,
+                #   'init_top_idx': init_top_idx,                # [B, K]
+                  'goal_candidate_topk': goal_candidate_topk,  # [B, K, 2]
                   'state_pred': state_pred, # [B, T, 2]
                 #   'goal_FDE_list': goal_FDE_list,
                 }
