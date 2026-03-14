@@ -109,13 +109,13 @@ class BEVTrajDecoderLayer(nn.Module):
         dec_embed = self.norm[1](self.bev_cross_attn(dec_embed, bev_feat, query_scale, ref_points))
 
         # 5) hybrid self-attn on K*T tokens
-        hybrid_tokens = dec_embed.permute(0, 2, 1, 3).reshape(self.K * self.T, B, self.D)  # [K*T,B,D]
-        hybrid_out = self.hybrid_self_attn(
-            query=hybrid_tokens, key=hybrid_tokens, value=hybrid_tokens
-        )[0]
-        hybrid_tokens = self.norm[2](hybrid_out + hybrid_tokens)
+        # hybrid_tokens = dec_embed.permute(0, 2, 1, 3).reshape(self.K * self.T, B, self.D)  # [K*T,B,D]
+        # hybrid_out = self.hybrid_self_attn(
+            # query=hybrid_tokens, key=hybrid_tokens, value=hybrid_tokens
+        # )[0]
+        # hybrid_tokens = self.norm[2](hybrid_out + hybrid_tokens)
         # restore [K,B,T,D]
-        dec_embed = hybrid_tokens.reshape(self.K, self.T, B, self.D).permute(0, 2, 1, 3).contiguous()
+        # dec_embed = hybrid_tokens.reshape(self.K, self.T, B, self.D).permute(0, 2, 1, 3).contiguous()
         # =================
 
         dec_embed = self.norm[2](self.ffn(dec_embed))
@@ -382,23 +382,23 @@ class BEVTrajDecoder(nn.Module):
         mode_prob = self.motion_cls_l1(dec_embed_T).squeeze(dim=-1).T  # [B,M]
         out_dist = self.motion_reg_l1(dec_embed_T)  # [M,B,T,5]
 
-        # ===================== top-K selection =====================
-        _, top_idx = torch.topk(mode_prob, K, dim=1)  # [B,K]
+        # # ===================== top-K selection =====================
+        # _, top_idx = torch.topk(mode_prob, K, dim=1)  # [B,K]
 
-        # gather indices
-        idx_mode = top_idx.permute(1,0)  # [K,B]
+        # # gather indices
+        # idx_mode = top_idx.permute(1,0)  # [K,B]
 
-        idx_embed = idx_mode.unsqueeze(-1).unsqueeze(-1).expand(K, B, self.T, self.D)
-        dec_embed_T = torch.gather(dec_embed_T, dim=0, index=idx_embed)
+        # idx_embed = idx_mode.unsqueeze(-1).unsqueeze(-1).expand(K, B, self.T, self.D)
+        # dec_embed_T = torch.gather(dec_embed_T, dim=0, index=idx_embed)
 
-        idx_traj = idx_mode.unsqueeze(-1).unsqueeze(-1).expand(K, B, self.T, 5)
-        out_dist_K = torch.gather(out_dist, dim=0, index=idx_traj)
+        # idx_traj = idx_mode.unsqueeze(-1).unsqueeze(-1).expand(K, B, self.T, 5)
+        # out_dist_K = torch.gather(out_dist, dim=0, index=idx_traj)
 
-        # goal candidates in target coord selected by initial_prediction top-k
-        idx_goal = top_idx.unsqueeze(-1).expand(B, K, 2)
-        goal_candidate_topk = torch.gather(goal_candidate_target, dim=1, index=idx_goal)  # [B, K, 2]
+        # # goal candidates in target coord selected by initial_prediction top-k
+        # idx_goal = top_idx.unsqueeze(-1).expand(B, K, 2)
+        # goal_candidate_topk = torch.gather(goal_candidate_target, dim=1, index=idx_goal)  # [B, K, 2]
 
-        return dec_embed_T, mode_prob, out_dist, out_dist_K, state_pred, goal_candidate_topk
+        return dec_embed_T, mode_prob, out_dist, state_pred
 
     def forward(self, scene_context, bev_feat, ec_dyn, tc_dyn, ego_dyn, **kwargs):
 
@@ -417,11 +417,11 @@ class BEVTrajDecoder(nn.Module):
         goal_candidate = goal_reg_list[-1].detach()
 
         # -------------------- Initial Prediction --------------------
-        dec_embed, init_mode_prob, init_pred_traj, init_pred_traj_K, state_pred, goal_candidate_topk = \
+        dec_embed, init_mode_prob, init_pred_traj, state_pred = \
             self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
         
         # ref_points = init_pred_traj[..., :2].detach().clone()
-        ref_points = init_pred_traj_K[..., :2].detach().clone()
+        ref_points = init_pred_traj[..., :2].detach().clone()
         mode_probs = [init_mode_prob]
         pred_trajs = [init_pred_traj.permute(0, 2, 1, 3)]
         
@@ -476,7 +476,7 @@ class BEVTrajDecoder(nn.Module):
                   'goal_reg_list': goal_reg_list,
                   'goal_prob_list' : goal_prob_list,
                 #   'init_top_idx': init_top_idx,                # [B, K]
-                  'goal_candidate_topk': goal_candidate_topk,  # [B, K, 2]
+                #   'goal_candidate_topk': goal_candidate_topk,  # [B, K, 2]
                   'state_pred': state_pred, # [B, T, 2]
                 #   'goal_FDE_list': goal_FDE_list,
                 }
