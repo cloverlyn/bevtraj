@@ -98,7 +98,7 @@ class BEVTraj(BaseModel):
         
         print("BEVTraj model initialized.")
         
-    def forward(self, batch):
+    def forward(self, batch, is_validation):
         traj_data = batch['traj_data']['input_dict']
         # bev_feat_raw = batch['bev_feat']
         ec_dynamics, tc_dynamics, ego_dynamics = self.prepare_decoder_input(traj_data)
@@ -121,16 +121,21 @@ class BEVTraj(BaseModel):
         # get loss
         output['dense_future_pred'] = dense_future_pred
         loss = self.get_loss(traj_data, output)
-
-        if is_validation:
-            last_traj, last_prob, _ = batch_nms(last_traj, last_prob, dist_thresh=2.5, num_ret_modes=10)
         
         last_logit = output['predicted_probability'][-1]
         last_prob = F.softmax(last_logit, dim=-1)
         last_traj = output['predicted_trajectory'][-1].permute(2, 0, 1, 3)
 
+        if is_validation:
+            last_traj, last_prob, ret_idxs = batch_nms(last_traj, last_prob, dist_thresh=2.5, num_ret_modes=10)
+
+            anchor_pos = output['anchor_pos']
+            batch_idx = torch.arange(B, device=ret_idxs.device)[:, None]
+            goal_candidate = anchor_pos[batch_idx, ret_idxs].permute(1, 0, 2)
+        else:
+            goal_candidate = anchor_pos.permute(1, 0, 2)
         # goal_candidate = output['goal_candidate_topk'].permute(1, 0, 2)
-        goal_candidate = output['goal_reg_list'][-1] # (K, B, 2)
+        # goal_candidate = output['goal_reg_list'][-1] # (K, B, 2)
         # goal_candidate = output['goal_candidate'].permute(1, 0, 2) # (B, K, 2) -> (K, B, 2)
         # goal_candidate = output['predicted_goal_reg']
         
@@ -200,11 +205,11 @@ class BEVTraj(BaseModel):
         return [optimizer], [scheduler]
     
     def training_step(self, batch, batch_idx):
-        prediction, loss = self.forward(batch)
+        prediction, loss = self.forward(batch, is_validation=False)
         self.log_info(batch['traj_data'], batch_idx, prediction, status='train')
         return loss
 
     def validation_step(self, batch, batch_idx):
-        prediction, loss = self.forward(batch)
+        prediction, loss = self.forward(batch, is_validation=True)
         self.log_info(batch['traj_data'], batch_idx, prediction, status='val')
         return loss

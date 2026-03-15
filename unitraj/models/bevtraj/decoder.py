@@ -14,24 +14,6 @@ from unitraj.models.bevtraj.utility import gen_sineembed_for_position, target_to
 from unitraj.models.bevtraj.temporal_attn import TemporalMHA, TemporalMHA_NoTimePE
 
 
-# class TemporalPositionalEncoding(nn.Module):
-#     def __init__(self, d_model, dropout=0.1, future_len=12, temperature=500.0):
-#         super().__init__()
-#         self.dropout = nn.Dropout(p=dropout)
-
-#         pe = torch.zeros(future_len, d_model)
-#         position = torch.arange(0, future_len).unsqueeze(1).float()
-#         div_term = torch.exp(torch.arange(0, d_model, 2).float()
-#                              * (-math.log(temperature) / d_model))
-#         pe[:, 0::2] = torch.sin(position * div_term)
-#         pe[:, 1::2] = torch.cos(position * div_term)
-#         self.register_buffer("pe", pe.unsqueeze(0))
-
-#     def forward(self, x):
-#         x = x + self.pe[:, :x.size(1)]
-#         return self.dropout(x)
-
-
 class BEVTrajDecoderLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -255,61 +237,9 @@ class BEVTrajDecoder(nn.Module):
 
         bda_token, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
-        B, _, D = bda_token.shape
-
-        goal_logit = self.goal_prob(bda_token).squeeze(-1)
-        goal_prob  = F.softmax(goal_logit, dim=-1)
-
-        # top-k
-        num_goal = 64 # hard code
-        # _, top_idx = torch.topk(goal_prob, k=self.K, dim=-1)
-        _, top_idx = torch.topk(goal_prob, k=num_goal, dim=-1)
-
-        # idx_tok = top_idx.unsqueeze(-1).expand(B, self.K, D)
-        # idx_pos = top_idx.unsqueeze(-1).expand(B, self.K, 2)
-        idx_tok = top_idx.unsqueeze(-1).expand(B, num_goal, D)
-        idx_pos = top_idx.unsqueeze(-1).expand(B, num_goal, 2)
-
-        mode_query = torch.gather(bda_token, dim=1, index=idx_tok).permute(1, 0, 2).contiguous()
-        goal_pos = torch.gather(bda_pos, dim=1, index=idx_pos)
-
-        # ================================= regression =================================
-
-        ref_pos = goal_pos.detach()
-
-        trans_x, trans_y, rot_sin, rot_cos = (
-            ego_dyn['ego_x'],
-            ego_dyn['ego_y'],
-            ego_dyn['ego_sin'],
-            ego_dyn['ego_cos'],
-        )
-
-        goal_reg_list = []
-        goal_prob_list = []
-        goal_prob_list.append(goal_prob)
-
-        for lid, layer in enumerate(self.goal_proposal):
-            query_scale = self.get_query_scale_sgcp(mode_query)
-            ref_pos_ego = target_to_ego(ref_pos, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)
-
-            mode_query = layer['norm1'](layer['deform_cross_attn']( \
-                    dec_embed = mode_query, bev_feat = bev_feat, query_scale = query_scale, ref_points = ref_pos_ego))
-            mode_query = layer['norm2'](layer['mode_self_attn']( \
-                    query = mode_query, key = mode_query, value = mode_query)[0] + mode_query)
-            mode_query = layer['norm3'](layer['ffn'](mode_query))
-
-            tmp = self.goal_reg(mode_query)
-            goal_reg = tmp + ref_pos.permute(1, 0, 2)
-
-            goal_reg_list.append(goal_reg)
-            ref_pos = goal_reg.detach().permute(1, 0, 2)
-
-            goal_logit = self.goal_prob_reg(mode_query).squeeze(-1).T
-            goal_prob = F.softmax(goal_logit, dim=-1)
-            goal_prob_list.append(goal_prob)
-            
-        # return mode_query, goal_prob, bda_pos, goal_reg_list, goal_FDE_list
-        return mode_query, bda_pos, goal_reg_list, goal_prob_list
+        mode_query = bda_token.permute(1, 0, 2).contiguous()
+        
+        return mode_query, bda_pos
 
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
         """
@@ -335,9 +265,8 @@ class BEVTrajDecoder(nn.Module):
             ego_dyn['ego_cos'],
         )
 
-        goal_candidate_target = goal_candidate.permute(1, 0, 2)  # [B, M, 2] (target coord)
         goal_candidate = target_to_ego(
-            goal_candidate_target, trans_x, trans_y, rot_sin, rot_cos
+            goal_candidate, trans_x, trans_y, rot_sin, rot_cos
         ).permute(1, 0, 2)  # [M, B, 2] (ego coord for BEV cross-attn)
 
         mode_embed = self.norm_l1[1](
@@ -382,22 +311,6 @@ class BEVTrajDecoder(nn.Module):
         mode_prob = self.motion_cls_l1(dec_embed_T).squeeze(dim=-1).T  # [B,M]
         out_dist = self.motion_reg_l1(dec_embed_T)  # [M,B,T,5]
 
-        # # ===================== top-K selection =====================
-        # _, top_idx = torch.topk(mode_prob, K, dim=1)  # [B,K]
-
-        # # gather indices
-        # idx_mode = top_idx.permute(1,0)  # [K,B]
-
-        # idx_embed = idx_mode.unsqueeze(-1).unsqueeze(-1).expand(K, B, self.T, self.D)
-        # dec_embed_T = torch.gather(dec_embed_T, dim=0, index=idx_embed)
-
-        # idx_traj = idx_mode.unsqueeze(-1).unsqueeze(-1).expand(K, B, self.T, 5)
-        # out_dist_K = torch.gather(out_dist, dim=0, index=idx_traj)
-
-        # # goal candidates in target coord selected by initial_prediction top-k
-        # idx_goal = top_idx.unsqueeze(-1).expand(B, K, 2)
-        # goal_candidate_topk = torch.gather(goal_candidate_target, dim=1, index=idx_goal)  # [B, K, 2]
-
         return dec_embed_T, mode_prob, out_dist, state_pred
 
     def forward(self, scene_context, bev_feat, ec_dyn, tc_dyn, ego_dyn, **kwargs):
@@ -410,15 +323,12 @@ class BEVTrajDecoder(nn.Module):
         scene_context = scene_context.permute(1, 0, 2)
 
         # -------------------Goal Candidate Proposal -----------------
-        mode_query, bda_pos, goal_reg_list, goal_prob_list = \
-            self.goal_candidate_proposal(
-                bev_feat, ec_dyn, tc_dyn, ego_dyn
-            )
-        goal_candidate = goal_reg_list[-1].detach()
+        mode_query, bda_pos = self.goal_candidate_proposal(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
         # -------------------- Initial Prediction --------------------
         dec_embed, init_mode_prob, init_pred_traj, state_pred = \
-            self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
+            self.initial_prediction(mode_query, scene_context, bev_feat, bda_pos, ego_dyn)
+            # self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
         
         # ref_points = init_pred_traj[..., :2].detach().clone()
         ref_points = init_pred_traj[..., :2].detach().clone()
@@ -473,8 +383,8 @@ class BEVTrajDecoder(nn.Module):
         output = {'predicted_probability': mode_probs,
                   'predicted_trajectory': pred_trajs,
                   'anchor_pos' : bda_pos,
-                  'goal_reg_list': goal_reg_list,
-                  'goal_prob_list' : goal_prob_list,
+                #   'goal_reg_list': goal_reg_list,
+                #   'goal_prob_list' : goal_prob_list,
                 #   'init_top_idx': init_top_idx,                # [B, K]
                 #   'goal_candidate_topk': goal_candidate_topk,  # [B, K, 2]
                   'state_pred': state_pred, # [B, T, 2]
