@@ -322,19 +322,19 @@ class BDA_DEC(BEVDeformableAggregation):
 
         # =============================== prototype ================================
 
-        ec_d = self.dynamics_enc['ec'](ec_dyn).reshape(B, -1) # (B, t_D * t)
-        ec_d = self.dynamics_enc['ec_t'](ec_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-        ec_d = self.dynamics_enc['ec_q'](ec_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
+        # ec_d = self.dynamics_enc['ec'](ec_dyn).reshape(B, -1) # (B, t_D * t)
+        # ec_d = self.dynamics_enc['ec_t'](ec_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
+        # ec_d = self.dynamics_enc['ec_q'](ec_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
         
-        ec_pos = self.dynamics_enc['ec_to_pos'](ec_d).tanh() * self.denorm_scale[None, None, :]
-        ec_pos= gen_sineembed_for_position(ec_pos, hidden_dim=self.D, temperature=10000)
+        # ec_pos = self.dynamics_enc['ec_to_pos'](ec_d).tanh() * self.denorm_scale[None, None, :]
+        # ec_pos= gen_sineembed_for_position(ec_pos, hidden_dim=self.D, temperature=10000)
         
-        tc_pos = gen_sineembed_for_position(ref_pos_target, hidden_dim=self.D, temperature=10000)
-        tc_d = self.dynamics_enc['tc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
-        tc_d = self.dynamics_enc['tc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-        tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), tc_pos) # (B, num_ba_query, D)
+        # tc_pos = gen_sineembed_for_position(ref_pos_target, hidden_dim=self.D, temperature=10000)
+        # tc_d = self.dynamics_enc['tc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
+        # tc_d = self.dynamics_enc['tc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
+        # tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), tc_pos) # (B, num_ba_query, D)
                     
-        output = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)) # (B, num_ba_query, D)
+        # output = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)) # (B, num_ba_query, D)
 
         ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
         query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
