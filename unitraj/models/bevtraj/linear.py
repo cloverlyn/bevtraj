@@ -126,6 +126,23 @@ class MotionClsHead(nn.Module):
         pred_obs = self.observation_model[2](agent_decoder_state)
         
         return pred_obs
+    
+
+class MotionVelHead(nn.Module):
+    def __init__(self, D=64):
+        super().__init__()
+        self.D = D
+        init_ = lambda m: init(
+            m, nn.init.xavier_normal_, lambda x: nn.init.constant_(x, 0), np.sqrt(2)
+        )
+        self.observation_model = nn.Sequential(
+            init_(nn.Linear(D, D)), nn.ReLU(),
+            init_(nn.Linear(D, D)), nn.ReLU(),
+            init_(nn.Linear(D, 2))
+        )
+
+    def forward(self, agent_decoder_state):
+        return self.observation_model(agent_decoder_state)
         
         
         

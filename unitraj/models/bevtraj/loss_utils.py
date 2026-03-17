@@ -15,6 +15,7 @@ class Criterion(nn.Module):
     def forward(self, out, gt, center_gt_final_valid_idx, traj_data):
         modes_preds = out['predicted_probability'] # [B, K]
         preds = out['predicted_trajectory'] # [K, T, B, 5]
+        pred_vels = out['predicted_velocity'] # [K, T, B, 2]
         anchor_pos = out['anchor_pos']
         dense_future_pred = out['dense_future_pred']
         state_pred = out['state_pred']
@@ -29,6 +30,7 @@ class Criterion(nn.Module):
         decoder_loss = self.get_decoder_loss_hard_assign(
             modes_preds=modes_preds,
             preds=preds,
+            pred_vels=pred_vels,
             goal_candidate=goal_candidate,
             gt_decoder=gt_decoder,
             center_gt_final_valid_idx=center_gt_final_valid_idx,
@@ -48,8 +50,9 @@ class Criterion(nn.Module):
         self,
         modes_preds,                 # list of [B, K]
         preds,                       # list of [K, T, B, 5]
+        pred_vels,                   # list of [K, T, B, 2]
         goal_candidate,              # [goal_candidate_full[B,64,2], goal_candidate_topk[B,K,2]]
-        gt_decoder,                  # [B, T, 3] -> (x, y, valid)
+        gt_decoder,                  # [B, T, 5] -> (x, y, vx, vy, valid)
         center_gt_final_valid_idx,   # [B]
     ):
         device = gt_decoder.device
@@ -57,7 +60,8 @@ class Criterion(nn.Module):
         b_idx = torch.arange(B, device=device)
 
         gt_xy = gt_decoder[..., :2]                     # [B, T, 2]
-        gt_mask = gt_decoder[..., 2].float()            # [B, T]
+        gt_vel = gt_decoder[..., 2:4]                   # [B, T, 2]
+        gt_mask = gt_decoder[..., 4].float()            # [B, T]
         final_idx = center_gt_final_valid_idx.long()    # [B]
         gt_goal = gt_xy[b_idx, final_idx]               # [B, 2]
         valid_final = gt_mask[b_idx, final_idx]         # [B]
@@ -69,8 +73,10 @@ class Criterion(nn.Module):
 
         w_cls = self.config.get('cls_weight', 2.0)
         w_reg = self.config.get('reg_weight', 1.0)
+        w_vel = self.config.get('vel_weight', 0.2)
         w_cls_final = self.config.get('cls_weight_final', 2.0)
         w_reg_final = self.config.get('reg_weight_final', 1.0)
+        w_vel_final = self.config.get('vel_weight_final', w_vel)
 
         # EDA-related config
         num_inter_layers = int(self.config.get('num_inter_layers', 2))
@@ -80,13 +86,15 @@ class Criterion(nn.Module):
         total = 0.0
         num_layers = len(preds)
 
-        for layer_idx, (pred_scores, pred) in enumerate(zip(modes_preds, preds)):
+        for layer_idx, (pred_scores, pred, pred_vel) in enumerate(zip(modes_preds, preds, pred_vels)):
             is_last_layer = (layer_idx == num_layers - 1)
             cur_w_cls = w_cls_final if is_last_layer else w_cls
             cur_w_reg = w_reg_final if is_last_layer else w_reg
+            cur_w_vel = w_vel_final if is_last_layer else w_vel
 
             # pred: [K, T, B, 5] -> [B, K, T, 5]
             pred_trajs = pred.permute(2, 0, 1, 3).contiguous()
+            pred_vel = pred_vel.permute(2, 0, 1, 3).contiguous()   # [B, K, T, 2]
 
             # ---------- Evolving Anchors ----------
             positive_layer_idx = (layer_idx // num_inter_layers) * num_inter_layers - 1
@@ -145,13 +153,17 @@ class Criterion(nn.Module):
                 use_square_gmm=False,
             )
 
+            pred_vel_pos = pred_vel[b_idx, hard_idx]  # [B, T, 2]
+            loss_reg_vel = F.l1_loss(pred_vel_pos, gt_vel, reduction='none')
+            loss_reg_vel = (loss_reg_vel * gt_mask[:, :, None]).sum(dim=-1).sum(dim=-1)
+
             # ---------- BCE classification ----------
             bce_target = torch.zeros_like(pred_scores)   # [B, K]
             bce_target[b_idx, hard_idx] = 1.0
             loss_cls = F.binary_cross_entropy_with_logits(pred_scores, bce_target, reduction='none')  # [B, K]
             loss_cls = (loss_cls * select_mask.float()).sum(dim=-1)                                    # [B]
 
-            layer_loss = cur_w_reg * loss_reg_gmm + cur_w_cls * loss_cls
+            layer_loss = cur_w_reg * loss_reg_gmm + cur_w_vel * loss_reg_vel + cur_w_cls * loss_cls
             layer_loss = (layer_loss * valid_final).sum() / valid_final.sum().clamp_min(1.0)
             total = total + layer_loss
 
@@ -160,10 +172,10 @@ class Criterion(nn.Module):
     def get_state_query_loss(self, state_pred, gt):
         """
         state_pred: [B, T, 2]
-        gt:         [B, T, 3]  (x, y, valid)
+        gt:         [B, T, 5]  (x, y, vx, vy, valid)
         """
         gt_xy = gt[..., :2]
-        gt_mask = gt[..., 2].float()  # [B,T]
+        gt_mask = gt[..., 4].float()  # [B,T]
 
         loss_xy = F.smooth_l1_loss(state_pred, gt_xy, reduction='none').sum(dim=-1)  # [B,T]
         loss_xy = (loss_xy * gt_mask).sum() / gt_mask.sum().clamp_min(1.0)

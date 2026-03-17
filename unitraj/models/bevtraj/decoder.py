@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from unitraj.models.bevtraj.bev_deformable_aggregation import BDA_DEC
 from unitraj.models.bevtraj.decoder_deform_attn import BEVDeformCrossAttn
-from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead
+from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead, MotionVelHead
 from unitraj.models.bevtraj.utility import gen_sineembed_for_position, target_to_ego
 
 from unitraj.models.bevtraj.temporal_attn import TemporalMHA, TemporalMHA_NoTimePE
@@ -188,6 +188,7 @@ class BEVTrajDecoder(nn.Module):
         # ])
         self.motion_cls_l1 = MotionClsHead(self.D, self.T_D, self.T)
         self.motion_reg_l1 = MotionRegHead(self.D)
+        self.motion_vel_l1 = MotionVelHead(self.D)
 
         # exp: DeMo-like ITP (state consistency branch)
         self.state_norm_l1 = nn.ModuleList([nn.LayerNorm(self.D) for _ in range(2)])
@@ -217,7 +218,7 @@ class BEVTrajDecoder(nn.Module):
         
         self.motion_cls = MotionClsHead(self.D, self.T_D, self.T)
         self.motion_reg = MotionRegHead(self.D)
-        self.motion_reg_final = MotionRegHead(self.D)
+        self.motion_vel = MotionVelHead(self.D)
 
         # exp: sample-conditioned deterministic code
         # self.temp_pos_enc = TemporalPositionalEncoding(self.D, self.dropout, future_len=self.T, temperature=10000)
@@ -310,8 +311,9 @@ class BEVTrajDecoder(nn.Module):
         # ===================== trajectory prediction =====================
         mode_prob = self.motion_cls_l1(dec_embed_T).squeeze(dim=-1).T  # [B,M]
         out_dist = self.motion_reg_l1(dec_embed_T)  # [M,B,T,5]
+        out_vel = self.motion_vel_l1(dec_embed_T)  # [M,B,T,2]
 
-        return dec_embed_T, mode_prob, out_dist, state_pred
+        return dec_embed_T, mode_prob, out_dist, state_pred, out_vel
 
     def forward(self, scene_context, bev_feat, ec_dyn, tc_dyn, ego_dyn, **kwargs):
 
@@ -326,7 +328,7 @@ class BEVTrajDecoder(nn.Module):
         mode_query, bda_pos = self.goal_candidate_proposal(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
         # -------------------- Initial Prediction --------------------
-        dec_embed, init_mode_prob, init_pred_traj, state_pred = \
+        dec_embed, init_mode_prob, init_pred_traj, state_pred, init_pred_vel = \
             self.initial_prediction(mode_query, scene_context, bev_feat, bda_pos, ego_dyn)
             # self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
         
@@ -334,6 +336,7 @@ class BEVTrajDecoder(nn.Module):
         ref_points = init_pred_traj[..., :2].detach().clone()
         mode_probs = [init_mode_prob]
         pred_trajs = [init_pred_traj.permute(0, 2, 1, 3)]
+        pred_vels = [init_pred_vel.permute(0, 2, 1, 3)]
         
         dec_embed = dec_embed.permute(2, 1, 0, 3).reshape(self.T, B * self.K, -1)
 
@@ -343,12 +346,7 @@ class BEVTrajDecoder(nn.Module):
         # exp: temporal PE (time_embedding_mlp)
         time_pe = self.build_time_pe(B, self.K, dec_embed.dtype)
 
-        num_refine_layers = len(self.dec_layers)
-        num_direct_layers = 2
-
         for lid, layer in enumerate(self.dec_layers):
-            use_direct_pred = (lid >= num_refine_layers - num_direct_layers)
-
             query_scale = self.get_query_scale_itr(dec_embed)
             dec_embed = layer(
                 dec_embed=dec_embed,
@@ -362,31 +360,26 @@ class BEVTrajDecoder(nn.Module):
             
             mode_prob = self.motion_cls(dec_embed).squeeze(dim=-1).T
 
-            if use_direct_pred:
-                pred_traj = self.motion_reg_final(dec_embed)   # [K, B, T, 5]
-                ref_points = pred_traj[..., :2].detach().clone()
-            else:
-                pred_traj_raw = self.motion_reg(dec_embed)          # [K, B, T, 5]
-                pred_xy = pred_traj_raw[..., :2] + ref_points       # out-of-place
-                pred_traj = torch.cat([pred_xy, pred_traj_raw[..., 2:]], dim=-1)
-                ref_points = pred_xy.detach().clone()
+            pred_traj_raw = self.motion_reg(dec_embed)          # [K, B, T, 5]
+            pred_xy = pred_traj_raw[..., :2] + ref_points       # out-of-place
+            pred_traj = torch.cat([pred_xy, pred_traj_raw[..., 2:]], dim=-1)
+            ref_points = pred_xy.detach().clone()
 
-            pred_traj = pred_traj.permute(0, 2, 1, 3)
-                
+            pred_vel = self.motion_vel(dec_embed) # [K, B, T, 2]
+
+            pred_traj = pred_traj.permute(0, 2, 1, 3).contiguous()
+            pred_vel = pred_vel.permute(0, 2, 1, 3).contiguous()
             mode_probs.append(mode_prob)
             pred_trajs.append(pred_traj)
+            pred_vels.append(pred_vel)
             
             dec_embed = dec_embed.permute(2, 1, 0, 3).reshape(self.T, B*self.K, -1)
             
         output = {'predicted_probability': mode_probs,
                   'predicted_trajectory': pred_trajs,
+                  'predicted_velocity': pred_vels,
                   'anchor_pos' : bda_pos,
-                #   'goal_reg_list': goal_reg_list,
-                #   'goal_prob_list' : goal_prob_list,
-                #   'init_top_idx': init_top_idx,                # [B, K]
-                #   'goal_candidate_topk': goal_candidate_topk,  # [B, K, 2]
                   'state_pred': state_pred, # [B, T, 2]
-                #   'goal_FDE_list': goal_FDE_list,
                 }
         return output
     

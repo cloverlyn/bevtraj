@@ -149,8 +149,10 @@ class BEVTraj(BaseModel):
     
     def get_loss(self, traj_data, prediction):
         ground_truth = []
-        decoder_gt = torch.cat([traj_data['center_gt_trajs'][..., :2], traj_data['center_gt_trajs_mask'].unsqueeze(-1)],
-                                 dim=-1)
+        decoder_gt = torch.cat(
+            [traj_data['center_gt_trajs'], traj_data['center_gt_trajs_mask'].unsqueeze(-1)],
+            dim=-1
+        )
         ground_truth.append(decoder_gt)
         dense_future_gt = {'obj_trajs_future_state': traj_data['obj_trajs_future_state'], 'obj_trajs_future_mask': traj_data['obj_trajs_future_mask']}
         ground_truth.append(dense_future_gt)
