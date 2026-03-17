@@ -11,7 +11,7 @@ from unitraj.models.bevtraj.decoder_deform_attn import BEVDeformCrossAttn
 from unitraj.models.bevtraj.linear import MLP, FFN, MotionRegHead, MotionClsHead, MotionVelHead
 from unitraj.models.bevtraj.utility import gen_sineembed_for_position, target_to_ego
 
-from unitraj.models.bevtraj.temporal_attn import TemporalMHA, TemporalMHA_NoTimePE
+from unitraj.models.bevtraj.temporal_sequential_module import TemporalMHA, TemporalMHA_NoTimePE
 
 
 class BEVTrajDecoderLayer(nn.Module):
