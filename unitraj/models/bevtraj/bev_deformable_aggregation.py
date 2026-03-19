@@ -9,7 +9,6 @@ import torch.nn.functional as F
 
 from unitraj.models.bevtraj.linear import build_mlp, MLP, FFN
 from unitraj.models.bevtraj.utility import gen_sineembed_for_position, target_to_ego
-from unitraj.models.bevtraj.temporal_sequential_module import TemporalDynamicsEncoder
 
 
 class QueryConditionedDynamics(nn.Module):
@@ -276,38 +275,16 @@ class BDA_DEC(BEVDeformableAggregation):
         self.t = config['past_len']
         self.t_D = config['t_dims']
 
-        # self.dynamics_enc = nn.ModuleDict({
-        #     'ec': MLP(self.config['target_attr'], self.D, self.t_D, 2),
-        #     'ec_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
-        #     'ec_q': QueryConditionedDynamics(self.D, self.D),
-        #     'ec_to_pos': MLP(self.D, self.D, 2, 2),
-        #     'tc': MLP(self.config['target_attr'], self.D, self.t_D, 2),
-        #     'tc_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
-        #     'tc_q': QueryConditionedDynamics(self.D, self.D),
-        #     # 'tc_to_pos': MLP(self.D, self.D, 2, 2),
-        #     'hyb': MLP(self.D + self.D, self.D, self.D, 3),
-        # })
-
         self.dynamics_enc = nn.ModuleDict({
-            'ec_temporal': TemporalDynamicsEncoder(
-                input_dim=self.config['target_attr'],
-                model_dim=self.D,
-                rnn_hidden_dim=self.D,
-                num_layers=1,
-                rnn_type='gru',   # or 'lstm'
-            ),
+            'ec': MLP(self.config['target_attr'], self.D, self.t_D, 2),
+            'ec_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
             'ec_q': QueryConditionedDynamics(self.D, self.D),
-
-            'tc_temporal': TemporalDynamicsEncoder(
-                input_dim=self.config['target_attr'],
-                model_dim=self.D,
-                rnn_hidden_dim=self.D,
-                num_layers=1,
-                rnn_type='gru',
-            ),
+            'ec_to_pos': MLP(self.D, self.D, 2, 2),
+            'tc': MLP(self.config['target_attr'], self.D, self.t_D, 2),
+            'tc_t': MLP(self.t_D * self.t, self.D // 2, self.D, 2),
             'tc_q': QueryConditionedDynamics(self.D, self.D),
-
-            'fusion': MLP(self.D + self.D, self.D, self.D, 3),
+            # 'tc_to_pos': MLP(self.D, self.D, 2, 2),
+            'hyb': MLP(self.D + self.D, self.D, self.D, 3),
         })
 
         self.bda_layers = nn.ModuleList([
@@ -328,7 +305,9 @@ class BDA_DEC(BEVDeformableAggregation):
         # self.ba_query_dec = nn.Parameter(torch.zeros(32, self.D), requires_grad=True) # kong_fixme
         # self.num_ba_query = 32
 
-    def forward(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
+        self.scene_ctx_fuse = MLP(self.D * 2, self.D, self.D, 2)
+
+    def forward(self, bev_feat, ec_dyn, tc_dyn, ego_dyn, target_scene_context=None):
         B = bev_feat.shape[0]
         # output = self.ba_query[None].repeat(B, 1, 1)
         output = self.ba_query_dec[None].repeat(B, 1, 1) # kong_fixme
@@ -345,31 +324,25 @@ class BDA_DEC(BEVDeformableAggregation):
 
         # =============================== prototype ================================
 
-        # ec_d = self.dynamics_enc['ec'](ec_dyn).reshape(B, -1) # (B, t_D * t)
-        # ec_d = self.dynamics_enc['ec_t'](ec_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-        # ec_d = self.dynamics_enc['ec_q'](ec_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
+        ec_d = self.dynamics_enc['ec'](ec_dyn).reshape(B, -1) # (B, t_D * t)
+        ec_d = self.dynamics_enc['ec_t'](ec_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
+        ec_d = self.dynamics_enc['ec_q'](ec_d.permute(1, 0, 2), output) # (B, num_ba_query, D)
         
-        # ec_pos = self.dynamics_enc['ec_to_pos'](ec_d).tanh() * self.denorm_scale[None, None, :]
-        # ec_pos= gen_sineembed_for_position(ec_pos, hidden_dim=self.D, temperature=10000)
+        ec_pos = self.dynamics_enc['ec_to_pos'](ec_d).tanh() * self.denorm_scale[None, None, :]
+        ec_pos= gen_sineembed_for_position(ec_pos, hidden_dim=self.D, temperature=10000)
         
-        # tc_pos = gen_sineembed_for_position(ref_pos_target, hidden_dim=self.D, temperature=10000)
-        # tc_d = self.dynamics_enc['tc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
-        # tc_d = self.dynamics_enc['tc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
-        # tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), tc_pos) # (B, num_ba_query, D)
+        tc_pos = gen_sineembed_for_position(ref_pos_target, hidden_dim=self.D, temperature=10000)
+        tc_d = self.dynamics_enc['tc'](tc_dyn).reshape(B, -1) # (B, t_D * t)
+        tc_d = self.dynamics_enc['tc_t'](tc_d).unsqueeze(0).expand(self.num_ba_query, -1, -1) # (num_ba_query, B, D)
+        tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), tc_pos) # (B, num_ba_query, D)
                     
-        # output = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)) # (B, num_ba_query, D)
+        output = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)) # (B, num_ba_query, D)
 
-        ec_d = self.dynamics_enc['ec_temporal'](ec_dyn)   # (B, D)
-        ec_d = ec_d.unsqueeze(1).expand(-1, self.num_ba_query, -1)
-        ec_d = self.dynamics_enc['ec_q'](ec_d, output)    # (B, K, D)
-
-        tc_d = self.dynamics_enc['tc_temporal'](tc_dyn)
-        tc_d = tc_d.unsqueeze(1).expand(-1, self.num_ba_query, -1)
-        tc_d = self.dynamics_enc['tc_q'](tc_d, output)    # (B, K, D)
-
-        output = self.dynamics_enc['fusion'](
-            torch.cat([tc_d, ec_d], dim=-1)
-        )
+        if target_scene_context is not None:
+            if target_scene_context.dim() == 2:  # [B, D]
+                target_scene_context = target_scene_context.unsqueeze(1)
+            target_scene_context = target_scene_context.expand(-1, self.num_ba_query, -1)  # [B, M, D]
+            output = self.scene_ctx_fuse(torch.cat([output, target_scene_context], dim=-1))
 
         ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
         query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)

@@ -250,5 +250,9 @@ class BEVTrajSceneContextEncoder(nn.Module):
         obj_feat, dense_future_pred = self.apply_dense_future_prediction(
             obj_feature=obj_feat, obj_mask=obj_valid_mask, obj_pos=obj_trajs_last_pos
         )
+
+        batch_idx = torch.arange(B, device=obj_feat.device)
+        target_idx = traj_data['track_index_to_predict']
+        target_scene_context = obj_feat[batch_idx, target_idx]   # [B, D]
         
-        return obj_feat, dense_future_pred
+        return obj_feat, dense_future_pred, target_scene_context

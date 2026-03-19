@@ -111,11 +111,13 @@ class BEVTraj(BaseModel):
         B = pre_encoder_emb.shape[0]
         bev_feature = torch.randn(B, 512, 128, 128, device=pre_encoder_emb.device)
 
-        scene_context_feature, dense_future_pred = self.scene_context_encoder(traj_data, pre_encoder_emb, bev_feature, ego_dynamics)
+        scene_context_feature, dense_future_pred, target_scene_context = self.scene_context_encoder(traj_data, pre_encoder_emb, bev_feature, ego_dynamics)
         
         # decoding
         bev_feature = self.bev_feat_down(bev_feature)
         scene_context_feature = self.sc_feat_down(scene_context_feature)
+        target_scene_context = self.sc_feat_down(target_scene_context)
+
         output = self.decoder(scene_context_feature, bev_feature, ec_dynamics, tc_dynamics, ego_dynamics)
         
         # get loss
@@ -126,16 +128,12 @@ class BEVTraj(BaseModel):
         last_prob = F.softmax(last_logit, dim=-1)
         last_traj = output['predicted_trajectory'][-1].permute(2, 0, 1, 3)
 
+        goal_candidate = output['goal_reg_list'][-1].permute(1, 0, 2).contiguous()  # (B, K, 2)
         if is_validation:
             last_traj, last_prob, ret_idxs = batch_nms(last_traj, last_prob, dist_thresh=2.5, num_ret_modes=10)
-
-            anchor_pos = output['anchor_pos']
             batch_idx = torch.arange(B, device=ret_idxs.device)[:, None]
-            goal_candidate = anchor_pos[batch_idx, ret_idxs].permute(1, 0, 2)
-        else:
-            goal_candidate = anchor_pos.permute(1, 0, 2)
+            goal_candidate = goal_candidate[batch_idx, ret_idxs]
         # goal_candidate = output['goal_candidate_topk'].permute(1, 0, 2)
-        # goal_candidate = output['goal_reg_list'][-1] # (K, B, 2)
         # goal_candidate = output['goal_candidate'].permute(1, 0, 2) # (B, K, 2) -> (K, B, 2)
         # goal_candidate = output['predicted_goal_reg']
         

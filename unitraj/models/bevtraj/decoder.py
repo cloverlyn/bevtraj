@@ -232,15 +232,54 @@ class BEVTrajDecoder(nn.Module):
 
         return self.time_emb_alpha * pe
 
-    def goal_candidate_proposal(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
+    def goal_candidate_proposal(self, bev_feat, ec_dyn, tc_dyn, ego_dyn, target_scene_context):
 
         # =============================== classification ===============================
 
-        bda_token, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
+        mode_query, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn, target_scene_context)
 
-        mode_query = bda_token.permute(1, 0, 2).contiguous()
-        
-        return mode_query, bda_pos
+        goal_logit = self.goal_prob(mode_query).squeeze(-1)
+        goal_prob  = F.softmax(goal_logit, dim=-1)
+
+        mode_query = mode_query.permute(1, 0, 2).contiguous()
+
+        # ================================= regression =================================
+
+        ref_pos = bda_pos.detach()
+
+        trans_x, trans_y, rot_sin, rot_cos = (
+            ego_dyn['ego_x'],
+            ego_dyn['ego_y'],
+            ego_dyn['ego_sin'],
+            ego_dyn['ego_cos'],
+        )
+
+        goal_reg_list = []
+        goal_prob_list = []
+        goal_prob_list.append(goal_prob)
+
+        for lid, layer in enumerate(self.goal_proposal):
+            query_scale = self.get_query_scale_sgcp(mode_query)
+            ref_pos_ego = target_to_ego(ref_pos, trans_x, trans_y, rot_sin, rot_cos).permute(1, 0, 2)
+
+            mode_query = layer['norm1'](layer['deform_cross_attn']( \
+                    dec_embed = mode_query, bev_feat = bev_feat, query_scale = query_scale, ref_points = ref_pos_ego))
+            mode_query = layer['norm2'](layer['mode_self_attn']( \
+                    query = mode_query, key = mode_query, value = mode_query)[0] + mode_query)
+            mode_query = layer['norm3'](layer['ffn'](mode_query))
+
+            tmp = self.goal_reg(mode_query)
+            goal_reg = tmp + ref_pos.permute(1, 0, 2)
+
+            goal_reg_list.append(goal_reg)
+            ref_pos = goal_reg.detach().permute(1, 0, 2)
+
+            goal_logit = self.goal_prob_reg(mode_query).squeeze(-1).T
+            goal_prob = F.softmax(goal_logit, dim=-1)
+            goal_prob_list.append(goal_prob)
+            
+        # return mode_query, goal_prob, bda_pos, goal_reg_list, goal_FDE_list
+        return mode_query, bda_pos, goal_reg_list, goal_prob_list
 
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
         """
@@ -266,6 +305,7 @@ class BEVTrajDecoder(nn.Module):
             ego_dyn['ego_cos'],
         )
 
+        goal_candidate = goal_candidate.permute(1, 0, 2).contiguous()
         goal_candidate = target_to_ego(
             goal_candidate, trans_x, trans_y, rot_sin, rot_cos
         ).permute(1, 0, 2)  # [M, B, 2] (ego coord for BEV cross-attn)
@@ -325,12 +365,17 @@ class BEVTrajDecoder(nn.Module):
         scene_context = scene_context.permute(1, 0, 2)
 
         # -------------------Goal Candidate Proposal -----------------
-        mode_query, bda_pos = self.goal_candidate_proposal(bev_feat, ec_dyn, tc_dyn, ego_dyn)
+        target_scene_context = kwargs.get('target_scene_context', None)
+        mode_query, bda_pos, goal_reg_list, goal_prob_list = \
+            self.goal_candidate_proposal(
+                bev_feat, ec_dyn, tc_dyn, ego_dyn, target_scene_context=target_scene_context
+            )
+        goal_candidate = goal_reg_list[-1].detach()
 
         # -------------------- Initial Prediction --------------------
         dec_embed, init_mode_prob, init_pred_traj, state_pred, init_pred_vel = \
-            self.initial_prediction(mode_query, scene_context, bev_feat, bda_pos, ego_dyn)
-            # self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
+            self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
+            # self.initial_prediction(mode_query, scene_context, bev_feat, bda_pos, ego_dyn)
         
         # ref_points = init_pred_traj[..., :2].detach().clone()
         ref_points = init_pred_traj[..., :2].detach().clone()
@@ -379,7 +424,12 @@ class BEVTrajDecoder(nn.Module):
                   'predicted_trajectory': pred_trajs,
                   'predicted_velocity': pred_vels,
                   'anchor_pos' : bda_pos,
+                  'goal_reg_list': goal_reg_list,
+                  'goal_prob_list' : goal_prob_list,
+                #   'init_top_idx': init_top_idx,                # [B, K]
+                #   'goal_candidate_topk': goal_candidate_topk,  # [B, K, 2]
                   'state_pred': state_pred, # [B, T, 2]
+                #   'goal_FDE_list': goal_FDE_list,
                 }
         return output
     
