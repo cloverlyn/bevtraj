@@ -91,13 +91,13 @@ class BEVTrajDecoderLayer(nn.Module):
         dec_embed = self.norm[1](self.bev_cross_attn(dec_embed, bev_feat, query_scale, ref_points))
 
         # 5) hybrid self-attn on K*T tokens
-        # hybrid_tokens = dec_embed.permute(0, 2, 1, 3).reshape(self.K * self.T, B, self.D)  # [K*T,B,D]
-        # hybrid_out = self.hybrid_self_attn(
-            # query=hybrid_tokens, key=hybrid_tokens, value=hybrid_tokens
-        # )[0]
-        # hybrid_tokens = self.norm[2](hybrid_out + hybrid_tokens)
+        hybrid_tokens = dec_embed.permute(0, 2, 1, 3).reshape(self.K * self.T, B, self.D)  # [K*T,B,D]
+        hybrid_out = self.hybrid_self_attn(
+            query=hybrid_tokens, key=hybrid_tokens, value=hybrid_tokens
+        )[0]
+        hybrid_tokens = self.norm[2](hybrid_out + hybrid_tokens)
         # restore [K,B,T,D]
-        # dec_embed = hybrid_tokens.reshape(self.K, self.T, B, self.D).permute(0, 2, 1, 3).contiguous()
+        dec_embed = hybrid_tokens.reshape(self.K, self.T, B, self.D).permute(0, 2, 1, 3).contiguous()
         # =================
 
         dec_embed = self.norm[2](self.ffn(dec_embed))
@@ -232,20 +232,29 @@ class BEVTrajDecoder(nn.Module):
 
         return self.time_emb_alpha * pe
 
-    def goal_candidate_proposal(self, bev_feat, ec_dyn, tc_dyn, ego_dyn, target_scene_context):
+    def goal_candidate_proposal(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
 
         # =============================== classification ===============================
 
-        mode_query, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn, target_scene_context)
+        bda_token, bda_pos = self.bda_sgcp(bev_feat, ec_dyn, tc_dyn, ego_dyn)
 
-        goal_logit = self.goal_prob(mode_query).squeeze(-1)
+        B, _, D = bda_token.shape
+
+        goal_logit = self.goal_prob(bda_token).squeeze(-1)
         goal_prob  = F.softmax(goal_logit, dim=-1)
 
-        mode_query = mode_query.permute(1, 0, 2).contiguous()
+        # top-k
+        _, top_idx = torch.topk(goal_prob, k=self.K, dim=-1)
+
+        idx_tok = top_idx.unsqueeze(-1).expand(B, self.K, D)
+        idx_pos = top_idx.unsqueeze(-1).expand(B, self.K, 2)
+
+        mode_query = torch.gather(bda_token, dim=1, index=idx_tok).permute(1, 0, 2).contiguous()
+        goal_pos = torch.gather(bda_pos, dim=1, index=idx_pos)
 
         # ================================= regression =================================
 
-        ref_pos = bda_pos.detach()
+        ref_pos = goal_pos.detach()
 
         trans_x, trans_y, rot_sin, rot_cos = (
             ego_dyn['ego_x'],
@@ -282,12 +291,7 @@ class BEVTrajDecoder(nn.Module):
         return mode_query, bda_pos, goal_reg_list, goal_prob_list
 
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
-        """
-        mode_query:    [M, B, D]   (M = 64)
-        scene_context: [n, B, D]
-        """
         M, B, _ = mode_query.shape
-        K = self.K  # 최종 사용할 mode 수 (10)
 
         # ===================== mode localization branch =====================
         query_scale = self.get_query_scale_itp(mode_query)
@@ -318,7 +322,6 @@ class BEVTrajDecoder(nn.Module):
                 ref_points=goal_candidate,
             )
         )
-
         mode_embed = self.norm_l1[2](self.ffn_l1(mode_embed))  # [M,B,D]
 
         # ===================== state consistency branch =====================
@@ -353,7 +356,7 @@ class BEVTrajDecoder(nn.Module):
         out_dist = self.motion_reg_l1(dec_embed_T)  # [M,B,T,5]
         out_vel = self.motion_vel_l1(dec_embed_T)  # [M,B,T,2]
 
-        return dec_embed_T, mode_prob, out_dist, state_pred, out_vel
+        return dec_embed_T, mode_prob, out_dist, out_vel, state_pred
 
     def forward(self, scene_context, bev_feat, ec_dyn, tc_dyn, ego_dyn, **kwargs):
 
@@ -365,19 +368,17 @@ class BEVTrajDecoder(nn.Module):
         scene_context = scene_context.permute(1, 0, 2)
 
         # -------------------Goal Candidate Proposal -----------------
-        target_scene_context = kwargs.get('target_scene_context', None)
         mode_query, bda_pos, goal_reg_list, goal_prob_list = \
             self.goal_candidate_proposal(
-                bev_feat, ec_dyn, tc_dyn, ego_dyn, target_scene_context=target_scene_context
+                bev_feat, ec_dyn, tc_dyn, ego_dyn
             )
         goal_candidate = goal_reg_list[-1].detach()
 
         # -------------------- Initial Prediction --------------------
-        dec_embed, init_mode_prob, init_pred_traj, state_pred, init_pred_vel = \
+        dec_embed, init_mode_prob, init_pred_traj, init_pred_vel, state_pred = \
             self.initial_prediction(mode_query, scene_context, bev_feat, goal_candidate, ego_dyn)
             # self.initial_prediction(mode_query, scene_context, bev_feat, bda_pos, ego_dyn)
         
-        # ref_points = init_pred_traj[..., :2].detach().clone()
         ref_points = init_pred_traj[..., :2].detach().clone()
         mode_probs = [init_mode_prob]
         pred_trajs = [init_pred_traj.permute(0, 2, 1, 3)]

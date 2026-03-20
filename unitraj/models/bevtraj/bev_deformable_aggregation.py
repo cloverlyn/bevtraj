@@ -305,9 +305,7 @@ class BDA_DEC(BEVDeformableAggregation):
         # self.ba_query_dec = nn.Parameter(torch.zeros(32, self.D), requires_grad=True) # kong_fixme
         # self.num_ba_query = 32
 
-        self.scene_ctx_fuse = MLP(self.D * 2, self.D, self.D, 2)
-
-    def forward(self, bev_feat, ec_dyn, tc_dyn, ego_dyn, target_scene_context=None):
+    def forward(self, bev_feat, ec_dyn, tc_dyn, ego_dyn):
         B = bev_feat.shape[0]
         # output = self.ba_query[None].repeat(B, 1, 1)
         output = self.ba_query_dec[None].repeat(B, 1, 1) # kong_fixme
@@ -337,12 +335,6 @@ class BDA_DEC(BEVDeformableAggregation):
         tc_d = self.dynamics_enc['tc_q'](tc_d.permute(1, 0, 2), tc_pos) # (B, num_ba_query, D)
                     
         output = self.dynamics_enc['hyb'](torch.cat([tc_d, ec_pos], dim=-1)) # (B, num_ba_query, D)
-
-        if target_scene_context is not None:
-            if target_scene_context.dim() == 2:  # [B, D]
-                target_scene_context = target_scene_context.unsqueeze(1)
-            target_scene_context = target_scene_context.expand(-1, self.num_ba_query, -1)  # [B, M, D]
-            output = self.scene_ctx_fuse(torch.cat([output, target_scene_context], dim=-1))
 
         ref_pos_norm = ref_pos / self.denorm_scale[None, None, :]
         query_sine_embed = gen_sineembed_for_position(ref_pos, hidden_dim=self.D, temperature=10000)
