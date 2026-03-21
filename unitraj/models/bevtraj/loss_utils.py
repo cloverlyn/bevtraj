@@ -18,6 +18,7 @@ class Criterion(nn.Module):
         pred_vels = out['predicted_velocity'] # [K, T, B, 2]
 
         anchor_pos = out['anchor_pos']
+        goal_pos = out['goal_pos']
         goal_reg_list = out['goal_reg_list']
         goal_prob_list = out['goal_prob_list']
 
@@ -28,7 +29,7 @@ class Criterion(nn.Module):
         gt_decoder = gt[0]
         gt_dense_future_trajs = gt[1]
         
-        goal_candidate = anchor_pos
+        goal_candidate = goal_pos
         # goal_candidate = out['goal_reg_list'][-1].permute(1, 0, 2)
         decoder_loss = self.get_decoder_loss_hard_assign(
             modes_preds=modes_preds,

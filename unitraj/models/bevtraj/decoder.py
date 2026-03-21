@@ -288,7 +288,7 @@ class BEVTrajDecoder(nn.Module):
             goal_prob_list.append(goal_prob)
             
         # return mode_query, goal_prob, bda_pos, goal_reg_list, goal_FDE_list
-        return mode_query, bda_pos, goal_reg_list, goal_prob_list
+        return mode_query, bda_pos, goal_pos, goal_reg_list, goal_prob_list
 
     def initial_prediction(self, mode_query, scene_context, bev_feat, goal_candidate, ego_dyn):
         M, B, _ = mode_query.shape
@@ -368,7 +368,7 @@ class BEVTrajDecoder(nn.Module):
         scene_context = scene_context.permute(1, 0, 2)
 
         # -------------------Goal Candidate Proposal -----------------
-        mode_query, bda_pos, goal_reg_list, goal_prob_list = \
+        mode_query, bda_pos, goal_pos, goal_reg_list, goal_prob_list = \
             self.goal_candidate_proposal(
                 bev_feat, ec_dyn, tc_dyn, ego_dyn
             )
@@ -425,6 +425,7 @@ class BEVTrajDecoder(nn.Module):
                   'predicted_trajectory': pred_trajs,
                   'predicted_velocity': pred_vels,
                   'anchor_pos' : bda_pos,
+                  'goal_pos' : goal_pos,
                   'goal_reg_list': goal_reg_list,
                   'goal_prob_list' : goal_prob_list,
                 #   'init_top_idx': init_top_idx,                # [B, K]
