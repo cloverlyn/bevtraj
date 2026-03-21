@@ -19,8 +19,7 @@ class Criterion(nn.Module):
 
         anchor_pos = out['anchor_pos']
         goal_pos = out['goal_pos']
-        goal_reg_list = out['goal_reg_list']
-        goal_prob_list = out['goal_prob_list']
+        goal_prob = out['goal_prob']
 
         dense_future_pred = out['dense_future_pred']
 
@@ -40,15 +39,9 @@ class Criterion(nn.Module):
             center_gt_final_valid_idx=center_gt_final_valid_idx,
         )
 
-        goal_pos_list = [anchor_pos] + [g.permute(1, 0, 2) for g in goal_reg_list]
         goal_prob_loss = self.get_goal_prob_loss(
-            goal_prob_list=goal_prob_list,
-            goal_pos_list=goal_pos_list,
-            gt=gt_decoder,
-            center_gt_final_valid_idx=center_gt_final_valid_idx,
-        )
-        goal_reg_loss = self.get_goal_prediction_loss(
-            goal_reg_list=goal_reg_list,
+            goal_prob=goal_prob,
+            goal_anchor=anchor_pos,
             gt=gt_decoder,
             center_gt_final_valid_idx=center_gt_final_valid_idx,
         )
@@ -61,7 +54,7 @@ class Criterion(nn.Module):
         dense_future_loss = self.get_dense_future_prediction_loss(dense_future_pred, gt_dense_future_trajs)
 
         # total_loss = decoder_loss + dense_future_loss + state_query_loss
-        total_loss = decoder_loss + goal_prob_loss + goal_reg_loss + dense_future_loss + state_query_loss
+        total_loss = decoder_loss + goal_prob_loss + state_query_loss + dense_future_loss
         return total_loss
 
     def get_decoder_loss_hard_assign( # EDA
@@ -189,53 +182,46 @@ class Criterion(nn.Module):
     
     def get_goal_prob_loss(
         self,
-        goal_prob_list,                  # [B, N] (prior over goal anchors)
-        goal_pos_list,                # [B, N, 2] (anchor positions in target coord)
-        gt,                         # [B, T, 3] (x, y, valid)
-        center_gt_final_valid_idx,  # [B]
+        goal_prob,
+        goal_anchor,
+        gt,
+        center_gt_final_valid_idx,
     ):
         eps = 1e-9
         entropy_weight = self.config.get('entropy_weight', 0.3)
         kl_weight = self.config.get('kl_weight', 1.0)
         sigma = self.config.get('goal_prob_sigma', 2.0)
 
-        num_layers = len(goal_prob_list)
-        total_loss = 0.0
-        for goal_prob, goal_pos in zip(goal_prob_list, goal_pos_list):
-            B, N = goal_prob.shape
-            device = goal_prob.device
-            b_idx = torch.arange(B, device=device)
+        B, N = goal_prob.shape
+        device = goal_prob.device
+        b_idx = torch.arange(B, device=device)
 
-            # per-sample final valid GT goal
-            gt_goal = gt[b_idx, center_gt_final_valid_idx.long(), :2]                  # [B, 2]
-            valid_final = gt[b_idx, center_gt_final_valid_idx.long(), -1].float()      # [B]
+        gt_goal = gt[b_idx, center_gt_final_valid_idx.long(), :2]             # [B, 2]
+        valid_final = gt[b_idx, center_gt_final_valid_idx.long(), -1].float() # [B]
 
-            # likelihood p(goal_gt | anchor_n): isotropic Gaussian (in log-space, const dropped)
-            sq_dist = ((goal_pos - gt_goal.unsqueeze(1)) ** 2).sum(dim=-1)          # [B, N]
-            log_lik = -0.5 * sq_dist / (sigma ** 2)                                     # [B, N]
+        sq_dist = ((goal_anchor - gt_goal.unsqueeze(1)) ** 2).sum(dim=-1)     # [B, N]
+        log_lik = -0.5 * sq_dist / (sigma ** 2)                                # [B, N]
 
-            # posterior q(n) ∝ p(goal_gt | n) * p(n)
-            prior = goal_prob.clamp_min(eps)
-            log_post_unnorm = log_lik + torch.log(prior)
-            log_post = log_post_unnorm - torch.logsumexp(log_post_unnorm, dim=-1, keepdim=True)
-            post_pr = torch.exp(log_post)                                               # [B, N]
+        prior = goal_prob.clamp_min(eps)                                       # [B, N]
+        log_prior = torch.log(prior)                                           # [B, N]
 
-            # expected negative log-likelihood under posterior
-            nll = ((-log_lik) * post_pr).sum(dim=-1)                                    # [B]
-            nll = (nll * valid_final).sum() / valid_final.sum().clamp_min(1.0)
+        log_post_unnorm = log_lik + log_prior
+        log_post = log_post_unnorm - torch.logsumexp(log_post_unnorm, dim=-1, keepdim=True)
+        post_pr = torch.exp(log_post)                                          # [B, N]
 
-            # posterior entropy (encourage confident assignment)
-            post_entropy = -(post_pr * torch.log(post_pr.clamp_min(eps))).sum(dim=-1)   # [B]
-            post_entropy = (post_entropy * valid_final).sum() / valid_final.sum().clamp_min(1.0)
+        denom = valid_final.sum().clamp_min(1.0)
 
-            # KL(post || prior), same style as nll_loss_multimodes
-            kl_loss_fn = torch.nn.KLDivLoss(reduction='batchmean')
-            kl_loss = kl_loss_fn(torch.log(prior), post_pr)
+        nll = ((-log_lik) * post_pr).sum(dim=-1)                               # [B]
+        nll = (nll * valid_final).sum() / denom
 
-            layer_loss = nll + entropy_weight * post_entropy + kl_weight * kl_loss
-            total_loss = total_loss + layer_loss
+        post_entropy = -(post_pr * torch.log(post_pr.clamp_min(eps))).sum(dim=-1)  # [B]
+        post_entropy = (post_entropy * valid_final).sum() / denom
 
-        return total_loss / num_layers
+        # sample-wise KL(post || prior): [B]
+        kl_per_sample = (post_pr * (log_post - log_prior)).sum(dim=-1)
+        kl_loss = (kl_per_sample * valid_final).sum() / denom
+
+        return nll + entropy_weight * post_entropy + kl_weight * kl_loss
 
     def get_goal_prediction_loss(self, goal_reg_list, gt, center_gt_final_valid_idx):
         """
